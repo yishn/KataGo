@@ -1,3 +1,7 @@
+.claude
+target
+.network.bin.gz
+
 *.[oa]
 *.exe
 *~
