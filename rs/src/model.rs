@@ -1272,7 +1272,10 @@ impl ModelDesc {
   /// Parse a model from already-decompressed bytes.
   ///
   /// `binary_floats` selects between binary (`@BIN@`) and text float blocks.
-  pub fn load_from_bytes(data: &[u8], binary_floats: bool) -> Result<Self, String> {
+  pub fn load_from_bytes(
+    data: &[u8],
+    binary_floats: bool,
+  ) -> Result<Self, String> {
     let mut reader = TokenReader::new(io::Cursor::new(data), binary_floats);
     Self::parse(&mut reader)
   }
@@ -1281,9 +1284,12 @@ impl ModelDesc {
   ///
   /// `binary_floats` selects between binary (`@BIN@`) and text float blocks
   /// (i.e. whether the original file was `.bin.gz` or `.txt.gz`).
-  pub fn load_from_gz_bytes(data: &[u8], binary_floats: bool) -> Result<Self, String> {
-    let decompressed =
-      decompress_gzip(data).map_err(|e| format!("gzip decompression failed: {e}"))?;
+  pub fn load_from_gz_bytes(
+    data: &[u8],
+    binary_floats: bool,
+  ) -> Result<Self, String> {
+    let decompressed = decompress_gzip(data)
+      .map_err(|e| format!("gzip decompression failed: {e}"))?;
     Self::load_from_bytes(&decompressed, binary_floats)
   }
 
@@ -1292,7 +1298,9 @@ impl ModelDesc {
   /// Not available on `wasm32` targets — use [`Self::load_from_bytes`] or
   /// [`Self::load_from_gz_bytes`] instead.
   #[cfg(not(target_arch = "wasm32"))]
-  pub fn load_from_file(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+  pub fn load_from_file(
+    path: impl AsRef<std::path::Path>,
+  ) -> Result<Self, String> {
     let path = path.as_ref();
     let lower = path.to_string_lossy().to_lowercase();
 
@@ -1416,14 +1424,21 @@ mod tests {
     #[test]
     fn network_trunk_channel_counts_are_consistent() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz")).unwrap();
+        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+          .unwrap();
 
-      assert_eq!(m.trunk.initial_conv.out_channels, m.trunk.trunk_num_channels);
+      assert_eq!(
+        m.trunk.initial_conv.out_channels,
+        m.trunk.trunk_num_channels
+      );
       assert_eq!(
         m.trunk.initial_mat_mul.out_channels,
         m.trunk.trunk_num_channels
       );
-      assert_eq!(m.trunk.trunk_tip_bn.num_channels, m.trunk.trunk_num_channels);
+      assert_eq!(
+        m.trunk.trunk_tip_bn.num_channels,
+        m.trunk.trunk_num_channels
+      );
       assert_eq!(
         m.trunk.trunk_num_channels,
         m.policy_head.p1_conv.in_channels
@@ -1438,7 +1453,8 @@ mod tests {
     #[test]
     fn network_policy_head_shapes_are_valid() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz")).unwrap();
+        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+          .unwrap();
       let ph = &m.policy_head;
 
       assert_eq!(ph.p2_conv.out_channels, ph.policy_out_channels);
@@ -1450,7 +1466,8 @@ mod tests {
     #[test]
     fn network_value_head_shapes_are_valid() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz")).unwrap();
+        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+          .unwrap();
       let vh = &m.value_head;
 
       assert_eq!(vh.v1_conv.out_channels, vh.v1_bn.num_channels);
@@ -1464,10 +1481,12 @@ mod tests {
     #[test]
     fn network_conv_weights_have_correct_size() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz")).unwrap();
+        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+          .unwrap();
       let ic = &m.trunk.initial_conv;
       let expected =
-        (ic.conv_y_size * ic.conv_x_size * ic.in_channels * ic.out_channels) as usize;
+        (ic.conv_y_size * ic.conv_x_size * ic.in_channels * ic.out_channels)
+          as usize;
       assert_eq!(
         ic.weights.len(),
         expected,
@@ -1478,9 +1497,14 @@ mod tests {
     #[test]
     fn network_bn_merged_params_are_finite() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz")).unwrap();
+        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+          .unwrap();
       let bn = &m.trunk.trunk_tip_bn;
-      for (i, (&s, &b)) in bn.merged_scale.iter().zip(bn.merged_bias.iter()).enumerate()
+      for (i, (&s, &b)) in bn
+        .merged_scale
+        .iter()
+        .zip(bn.merged_bias.iter())
+        .enumerate()
       {
         assert!(s.is_finite(), "merged_scale[{i}] is not finite: {s}");
         assert!(b.is_finite(), "merged_bias[{i}] is not finite: {b}");
