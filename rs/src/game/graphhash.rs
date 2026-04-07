@@ -2,7 +2,7 @@
 /// `cpp/game/graphhash.h` and `cpp/game/graphhash.cpp`.
 use crate::game::{
   Hash128,
-  board::{Player, ZOBRIST_PASS_ENDS_PHASE, ZOBRIST_GAME_IS_OVER},
+  board::{Player, ZOBRIST_GAME_IS_OVER, ZOBRIST_PASS_ENDS_PHASE},
   boardhistory::BoardHistory,
 };
 
@@ -57,8 +57,12 @@ pub fn get_state_hash(
     None => return Hash128::ZERO,
   };
 
-  let mut hash =
-    BoardHistory::get_situation_rules_and_ko_hash(board, hist, next_player, draw_equivalent_wins_for_white);
+  let mut hash = BoardHistory::get_situation_rules_and_ko_hash(
+    board,
+    hist,
+    next_player,
+    draw_equivalent_wins_for_white,
+  );
 
   let pass_ends_phase = hist.pass_would_end_phase(board, next_player);
   if pass_ends_phase {
@@ -87,7 +91,8 @@ pub fn get_graph_hash(
   rep_bound: usize,
   draw_equivalent_wins_for_white: f64,
 ) -> Hash128 {
-  let state_hash = get_state_hash(hist, next_player, draw_equivalent_wins_for_white);
+  let state_hash =
+    get_state_hash(hist, next_player, draw_equivalent_wins_for_white);
 
   // Check for repetition: scan back through history for matching state hashes.
   // (C++ uses board.simpleRepetitionBoundGt; here we approximate via ko_hash_history.)
@@ -139,7 +144,8 @@ pub fn get_graph_hash_from_scratch(
   // For a simplified implementation, compute the state hash directly.
   // Full graph hash from scratch would require replaying all moves.
   // This is acceptable for the current translation scope.
-  let state_hash = get_state_hash(hist, next_player, draw_equivalent_wins_for_white);
+  let state_hash =
+    get_state_hash(hist, next_player, draw_equivalent_wins_for_white);
   Hash128::new(
     nasam(state_hash.hash0, state_hash.hash0 ^ 0xdeadbeef_cafebabe),
     nasam(state_hash.hash1, state_hash.hash1 ^ 0x01234567_89abcdef),
@@ -154,7 +160,7 @@ pub fn get_graph_hash_from_scratch(
 mod tests {
   use super::*;
   use crate::game::{
-    board::{Board, location, PASS_LOC},
+    board::{Board, PASS_LOC, location},
     boardhistory::BoardHistory,
     rules::Rules,
   };
@@ -167,7 +173,12 @@ mod tests {
 
     let mut b2 = Board::new(9, 9);
     let mut h2 = BoardHistory::new(&b2, Player::Black, Rules::default(), 0);
-    h2.make_board_move(&mut b2, location::get_loc(4, 4, 9), Player::Black, None);
+    h2.make_board_move(
+      &mut b2,
+      location::get_loc(4, 4, 9),
+      Player::Black,
+      None,
+    );
     let hash_stone = get_state_hash(&h2, Player::White, 0.5);
 
     assert_ne!(hash_empty, hash_stone);
@@ -199,16 +210,20 @@ mod tests {
   #[test]
   fn finished_game_hash_differs_from_in_progress() {
     let b = Board::new(9, 9);
-    let h_in_progress = BoardHistory::new(&b, Player::Black, Rules::default(), 0);
+    let h_in_progress =
+      BoardHistory::new(&b, Player::Black, Rules::default(), 0);
     let hash_in_progress = get_state_hash(&h_in_progress, Player::Black, 0.5);
 
     let mut b2 = Board::new(9, 9);
-    let mut h_finished = BoardHistory::new(&b2, Player::Black, Rules::default(), 0);
+    let mut h_finished =
+      BoardHistory::new(&b2, Player::Black, Rules::default(), 0);
     h_finished.make_board_move(&mut b2, PASS_LOC, Player::Black, None);
     h_finished.make_board_move(&mut b2, PASS_LOC, Player::White, None);
     let hash_finished = get_state_hash(&h_finished, Player::Black, 0.5);
 
-    assert_ne!(hash_in_progress, hash_finished,
-      "finished game should have different hash");
+    assert_ne!(
+      hash_in_progress, hash_finished,
+      "finished game should have different hash"
+    );
   }
 }

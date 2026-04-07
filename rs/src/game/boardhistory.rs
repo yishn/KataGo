@@ -101,6 +101,7 @@ impl Default for KoHashTable {
 // ---------------------------------------------------------------------------
 
 /// Complete game state including history of moves, ko bans, and scoring.
+#[derive(Clone)]
 pub struct BoardHistory {
   pub rules: Rules,
   pub move_history: Vec<Move>,
