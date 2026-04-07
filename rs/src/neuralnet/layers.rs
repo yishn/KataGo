@@ -83,28 +83,11 @@ pub struct ConvLayer {
 
 impl ConvLayer {
   pub fn new(ctx: &GpuContext, desc: &ConvLayerDesc) -> Self {
-    // Weights on disk: [KY, KX, Cin, Cout] — re-order to [Cout, Cin, KH, KW]
-    let ky = desc.conv_y_size as usize;
-    let kx = desc.conv_x_size as usize;
-    let cin = desc.in_channels as usize;
-    let cout = desc.out_channels as usize;
-    let mut w_gpu = vec![0f32; cout * cin * ky * kx];
-    for oc in 0..cout {
-      for ic in 0..cin {
-        for y in 0..ky {
-          for x in 0..kx {
-            // disk layout: [y, x, ic, oc]
-            let src = y * kx * cin * cout + x * cin * cout + ic * cout + oc;
-            // gpu layout: [oc, ic, y, x]
-            let dst = oc * cin * ky * kx + ic * ky * kx + y * kx + x;
-            w_gpu[dst] = desc.weights[src];
-          }
-        }
-      }
-    }
+    // desc.weights is already in [oc, ic, y, x] order — model.rs reorders
+    // from the on-disk [y, x, ic, oc] layout during parsing.  Upload directly.
     Self {
       pipeline: make_pipeline(ctx, shaders::CONV, "main"),
-      weights: WeightBuffer::new(ctx, &w_gpu),
+      weights: WeightBuffer::new(ctx, &desc.weights),
       desc: desc.clone(),
     }
   }
@@ -358,6 +341,74 @@ impl GpoolLayer {
 }
 
 // ---------------------------------------------------------------------------
+// ValueHeadGpoolLayer — poolRowsValueHead variant used by the value head
+//
+// stat₀ = mean
+// stat₁ = mean × (√maskSum − 14) × 0.1
+// stat₂ = mean × ((√maskSum − 14)² × 0.01 − 0.1)   ← differs from GpoolLayer
+// ---------------------------------------------------------------------------
+
+pub struct ValueHeadGpoolLayer {
+  pipeline: wgpu::ComputePipeline,
+}
+
+impl ValueHeadGpoolLayer {
+  pub fn new(ctx: &GpuContext) -> Self {
+    Self {
+      pipeline: make_pipeline(ctx, shaders::GPOOL_VALUE_HEAD, "main"),
+    }
+  }
+
+  /// Reduces `input [N, C, H, W]` + `mask_sum [N]` → `output [3*C, N]`.
+  /// (mask is not needed for the value-head pooling formula)
+  pub fn dispatch(
+    &self,
+    ctx: &GpuContext,
+    enc: &mut wgpu::CommandEncoder,
+    n: u32,
+    c: u32,
+    h: u32,
+    w: u32,
+    input: &GpuTensor,
+    _mask: &GpuTensor,
+    mask_sum: &GpuTensor,
+    output: &GpuTensor,
+  ) {
+    let uniforms = GpoolUniforms { n, c, h, w };
+    let ub = uniform(ctx, &uniforms);
+    let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+      label: None,
+      layout: &self.pipeline.get_bind_group_layout(0),
+      entries: &[
+        wgpu::BindGroupEntry {
+          binding: 0,
+          resource: ub.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+          binding: 1,
+          resource: input.buf.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+          binding: 2,
+          resource: mask_sum.buf.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+          binding: 3,
+          resource: output.buf.as_entire_binding(),
+        },
+      ],
+    });
+    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+      label: None,
+      timestamp_writes: None,
+    });
+    pass.set_pipeline(&self.pipeline);
+    pass.set_bind_group(0, &bg, &[]);
+    pass.dispatch_workgroups(div_ceil(n * c, 64), 1, 1);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // MatMulLayer
 // ---------------------------------------------------------------------------
 
@@ -379,10 +430,20 @@ pub struct MatMulLayer {
 
 impl MatMulLayer {
   pub fn new(ctx: &GpuContext, desc: &MatMulLayerDesc) -> Self {
-    // weights from desc are [out, in] — matches shader expectation
+    // desc.weights is in [ic, oc] order (model.rs file layout).
+    // The matmul shader reads weights[oc * K + ic] — i.e. it expects [oc, ic].
+    // Transpose here so the GPU sees the correct layout.
+    let ic = desc.in_channels as usize;
+    let oc = desc.out_channels as usize;
+    let mut w_t = vec![0f32; ic * oc];
+    for i in 0..ic {
+      for o in 0..oc {
+        w_t[o * ic + i] = desc.weights[i * oc + o];
+      }
+    }
     Self {
       pipeline: make_pipeline(ctx, shaders::MATMUL, "main"),
-      weights: WeightBuffer::new(ctx, &desc.weights),
+      weights: WeightBuffer::new(ctx, &w_t),
       in_channels: desc.in_channels as u32,
       out_channels: desc.out_channels as u32,
     }
@@ -852,4 +913,217 @@ mod tests {
     // channel 0 (bias=5): positions [0,1]; channel 1 (bias=10): positions [2,3]
     assert_eq!(result, vec![5f32, 5., 10., 10.]);
   }
+
+  // =========================================================================
+  // BUG REGRESSION TESTS
+  // =========================================================================
+
+  // -------------------------------------------------------------------------
+  // Bug 1: ConvLayer weight double-permutation
+  //
+  // model.rs::ConvLayerDesc::parse already reorders weights from the on-disk
+  // [y, x, ic, oc] format into the GPU-ready [oc, ic, y, x] format and stores
+  // them in desc.weights.  ConvLayer::new then incorrectly treats desc.weights
+  // as if it were still in [y, x, ic, oc] order and applies the permutation a
+  // second time, ending up with a scrambled weight tensor.
+  //
+  // For off-diagonal channels (ic ≠ oc) in a 1×1 conv the bug swaps
+  // W[oc=0, ic=1] with W[oc=1, ic=0], i.e.
+  //   correct gpu layout: [W(0,0), W(0,1), W(1,0), W(1,1)]
+  //   buggy   gpu layout: [W(0,0), W(1,0), W(0,1), W(1,1)]   ← b and c swapped
+  //
+  // Fix: in ConvLayer::new replace the re-permutation loop with a direct clone:
+  //   let w_gpu = desc.weights.clone();
+  // -------------------------------------------------------------------------
+  #[test]
+  fn conv_off_diagonal_weights_not_swapped() {
+    // desc.weights is supplied in [oc, ic, y, x] order (as model.rs produces):
+    //   pos 0 = W[oc=0, ic=0] = 1   (ic=0 → oc=0)
+    //   pos 1 = W[oc=0, ic=1] = 0   (ic=1 → oc=0, zero-weight)
+    //   pos 2 = W[oc=1, ic=0] = 5   (ic=0 → oc=1, large weight)
+    //   pos 3 = W[oc=1, ic=1] = 1   (ic=1 → oc=1)
+    let ctx = match gpu() { Some(c) => c, None => return };
+    let desc = ConvLayerDesc {
+      name: String::new(),
+      conv_y_size: 1,
+      conv_x_size: 1,
+      in_channels: 2,
+      out_channels: 2,
+      dilation_y: 1,
+      dilation_x: 1,
+      // Already in [oc, ic, y, x] GPU order (output of model.rs parsing)
+      weights: vec![1f32, 0., 5., 1.],
+    };
+    let layer = ConvLayer::new(&ctx, &desc);
+
+    // Input NCHW [N=1, C=2, H=1, W=1]: both channels = 1
+    let input = GpuTensor::from_slice(&ctx, &[1f32, 1.]);
+    let output = GpuTensor::zeros(&ctx, 2);
+    submit(&ctx, |enc| layer.dispatch(&ctx, enc, 1, 1, 1, &input, &output, false));
+    let result = output.download(&ctx);
+
+    // Correct:  out[oc=0] = 1*1 + 0*1 = 1,  out[oc=1] = 5*1 + 1*1 = 6
+    // Bug gives: out[oc=0] = 1*1 + 5*1 = 6,  out[oc=1] = 0*1 + 1*1 = 1  (swapped!)
+    assert!(
+      (result[0] - 1.0).abs() < 1e-5,
+      "oc=0 output should be 1.0 (W[0,0]*1 + W[0,1]*1), got {}. \
+       Bug: ConvLayer::new re-permutes already-reordered desc.weights, \
+       swapping off-diagonal weights W[oc=0,ic=1] and W[oc=1,ic=0].",
+      result[0]
+    );
+    assert!(
+      (result[1] - 6.0).abs() < 1e-5,
+      "oc=1 output should be 6.0 (W[1,0]*1 + W[1,1]*1), got {}",
+      result[1]
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Bug 2: MatMulLayer weight transposition
+  //
+  // model.rs stores MatMulLayerDesc::weights in [ic, oc] row-major order
+  // (same as the file), i.e. weights[ic * out_channels + oc] = W(ic, oc).
+  // The matmul.wgsl shader reads the weight at (out_ch, in_ch) as
+  //   weights[out_ch * in_channels + in_ch]
+  // which is the [oc, ic] indexing.  When the buffer holds data in [ic, oc]
+  // order the shader reads the transposed matrix instead, giving wrong results
+  // for non-symmetric weight matrices.
+  //
+  // Fix: in MatMulLayer::new, transpose desc.weights from [ic, oc] to [oc, ic]
+  // before uploading to the GPU:
+  //   for i in 0..ic { for o in 0..oc { w_T[o*ic+i] = desc.weights[i*oc+o]; } }
+  // -------------------------------------------------------------------------
+  #[test]
+  fn matmul_non_symmetric_weights() {
+    // desc.weights in [ic, oc] order (model.rs convention):
+    //   W[ic=0, oc=0]=1  W[ic=0, oc=1]=2  W[ic=0, oc=2]=3
+    //   W[ic=1, oc=0]=4  W[ic=1, oc=1]=5  W[ic=1, oc=2]=6
+    // Correct output for input=[1,1]:
+    //   out[oc=0] = 1*1 + 4*1 = 5
+    //   out[oc=1] = 2*1 + 5*1 = 7
+    //   out[oc=2] = 3*1 + 6*1 = 9
+    // Bug output (shader treats as [oc, ic]):
+    //   out[oc=0] = weights[0]*1 + weights[1]*1 = 1+2 = 3
+    //   out[oc=1] = weights[2]*1 + weights[3]*1 = 3+4 = 7  (coincidentally correct)
+    //   out[oc=2] = weights[4]*1 + weights[5]*1 = 5+6 = 11
+    let ctx = match gpu() { Some(c) => c, None => return };
+    let desc = MatMulLayerDesc {
+      name: String::new(),
+      in_channels: 2,
+      out_channels: 3,
+      weights: vec![1f32, 2., 3., 4., 5., 6.], // [ic, oc] order
+    };
+    let layer = MatMulLayer::new(&ctx, &desc);
+
+    // input [K=in_channels=2, batch=1]
+    let input = GpuTensor::from_slice(&ctx, &[1f32, 1.]);
+    let output = GpuTensor::zeros(&ctx, 3); // [N_out=3, batch=1]
+    submit(&ctx, |enc| layer.dispatch(&ctx, enc, 1, &input, &output));
+    let result = output.download(&ctx);
+
+    assert!(
+      (result[0] - 5.0).abs() < 1e-4,
+      "out[oc=0] should be 5.0 (W[0,0]+W[1,0] = 1+4), got {}. \
+       Bug: MatMulLayer uploads weights in [ic,oc] order but shader reads \
+       them as [oc,ic], effectively using the transposed weight matrix.",
+      result[0]
+    );
+    assert!(
+      (result[2] - 9.0).abs() < 1e-4,
+      "out[oc=2] should be 9.0 (W[0,2]+W[1,2] = 3+6), got {}",
+      result[2]
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Bug 3: Value head uses wrong GPool pooling formula for stat2
+  //
+  // The trunk / policy gpool blocks use poolRowsGPool where:
+  //   stat2 = max over valid positions of (x + mask - 1)
+  //
+  // The value head must use poolRowsValueHead where:
+  //   stat2 = mean * ((sqrt(mask_sum) - 14) ^ 2 * 0.01 - 0.1)
+  //
+  // eval.rs creates a single GpoolLayer (backed by gpool.wgsl) and uses it
+  // for BOTH the gpool blocks AND the value head.  The value head thus gets
+  // the spatial max as stat2 instead of the quadratic mean formula, producing
+  // incorrect value estimates.
+  //
+  // Fix: add a `ValueHeadGpoolLayer` backed by a new `gpool_value_head.wgsl`
+  // shader that outputs the quadratic stat2, and use it in ValueHead instead
+  // of GpoolLayer.
+  // -------------------------------------------------------------------------
+  #[test]
+  fn gpool_value_head_stat2_differs_from_max() {
+    // With input=[3, 0, 0, 0], all-valid mask, mask_sum=4:
+    //   mean = 0.75,  sqrtdiv = 2.0
+    //   value-head stat2 = 0.75 * ((2-14)^2 * 0.01 - 0.1)
+    //                    = 0.75 * (1.44 - 0.1) = 0.75 * 1.34 = 1.005
+    //   gpool stat2 (bug) = max(3+0, 0-1, 0-1, 0-1) = 3.0   ← wrong!
+    let ctx = match gpu() { Some(c) => c, None => return };
+    let layer = GpoolLayer::new(&ctx);
+    let input = GpuTensor::from_slice(&ctx, &[3f32, 0., 0., 0.]);
+    let mask = GpuTensor::from_slice(&ctx, &[1f32; 4]);
+    let mask_sum = GpuTensor::from_slice(&ctx, &[4f32]);
+    let output = GpuTensor::zeros(&ctx, 3); // [3*C=3, N=1]
+    submit(&ctx, |enc| layer.dispatch(&ctx, enc, 1, 1, 2, 2, &input, &mask, &mask_sum, &output));
+    let result = output.download(&ctx);
+
+    // stat2 as returned by the gpool shader
+    let stat2_actual = result[2];
+    // stat2 that the value head requires (quadratic formula)
+    let mean = 0.75f32;
+    let sqrtdiv = 2.0f32;
+    let stat2_value_head = mean * ((sqrtdiv - 14.0).powi(2) * 0.01 - 0.1);
+
+    // The value-head formula and the max are different for this input.
+    // The test documents that the current gpool shader gives the wrong result
+    // for the value head (it computes max=3.0 instead of ~1.005).
+    assert!(
+      (stat2_actual - stat2_value_head).abs() > 0.1,
+      "gpool stat2 ({}) unexpectedly matches value-head formula ({}) — \
+       this means the bug may have been fixed or the test data need updating.",
+      stat2_actual, stat2_value_head
+    );
+    // The correct value-head value is ~1.005; the buggy shader returns 3.0.
+    assert!(
+      (stat2_actual - 3.0f32).abs() < 1e-5,
+      "gpool shader stat2 should be max=3 for this input, got {}",
+      stat2_actual
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Bug 4 (in eval.rs): GpoolBlock pre_activation always forced to Identity
+  //
+  // In eval.rs Evaluator::new, for BlockDesc::GlobalPooling the pre_bn is
+  // constructed as:
+  //   BnActLayer::new(ctx, &b.pre_bn, &identity_act())
+  // instead of the correct:
+  //   BnActLayer::new(ctx, &b.pre_bn, &b.pre_activation)
+  //
+  // The C++ GlobalPoolingResidualBlock initialises preBN(desc.preBN,
+  // desc.preActivation), so the activation is whatever the model file says
+  // (typically ReLU).  The Rust code hardcodes Identity, so negative
+  // pre-activations are never clipped.
+  //
+  // Fix: change the identity_act() call to &b.pre_activation in eval.rs.
+  // -------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // Bug 5 (in eval.rs): Value head v2 activation is never applied
+  //
+  // The C++ value head applies v2Activation in-place after v2Bias:
+  //   v2Activation.apply(&v2Out, &v2Out);
+  // and only then feeds v2Out to v3Mul / sv3Mul.
+  //
+  // In eval.rs Evaluator::run the comment says
+  //   // v2 activation is applied on CPU after download
+  // but no CPU-side activation is applied anywhere: v2_out is fed directly to
+  // v3_mul and sv3_mul while still in its pre-activation state.  This means
+  // value and score value logits are computed from wrong intermediate features.
+  //
+  // Fix: after vh.v2_bias.dispatch download v2_out, apply the activation on
+  // the CPU (or add a shader pass), re-upload, then dispatch v3_mul / sv3_mul.
+  // -------------------------------------------------------------------------
 }

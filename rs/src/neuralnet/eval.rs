@@ -14,7 +14,7 @@ use super::{
   buffers::{GpuTensor, nhwc_to_nchw},
   layers::{
     BnActLayer, ConvLayer, GpoolLayer, MatBiasLayer, MatMulLayer,
-    NcBroadcastBiasAdd,
+    NcBroadcastBiasAdd, ValueHeadGpoolLayer,
   },
 };
 
@@ -71,7 +71,7 @@ struct PolicyHead {
 struct ValueHead {
   v1_conv: ConvLayer,
   v1_bn: BnActLayer,
-  gpool: GpoolLayer,
+  gpool: ValueHeadGpoolLayer,
   v2_mul: MatMulLayer,
   v2_bias: MatBiasLayer,
   v2_act: u32, // activation code (0/1/2)
@@ -112,12 +112,12 @@ pub struct Evaluator {
   model_version: i32,
 }
 
-// Helper: build a dummy identity activation descriptor
-fn identity_act() -> ActivationLayerDesc {
-  ActivationLayerDesc {
-    name: String::new(),
-    activation: Activation::Identity,
-  }
+/// CPU-side Mish activation, matching bn_act.wgsl.
+#[inline]
+fn mish(x: f32) -> f32 {
+  let x_hi = x.min(20.0);
+  let sp = (1.0 + x_hi.exp()).ln() + (x - x_hi); // softplus, overflow-safe
+  x * sp.tanh()
 }
 
 impl Evaluator {
@@ -149,7 +149,7 @@ impl Evaluator {
         }
         BlockDesc::GlobalPooling(b) => {
           blocks.push(Block::Gpool(GpoolBlock {
-            pre_bn: BnActLayer::new(ctx, &b.pre_bn, &identity_act()),
+            pre_bn: BnActLayer::new(ctx, &b.pre_bn, &b.pre_activation),
             regular_conv: ConvLayer::new(ctx, &b.regular_conv),
             gpool_conv: ConvLayer::new(ctx, &b.gpool_conv),
             gpool_bn: BnActLayer::new(ctx, &b.gpool_bn, &b.gpool_activation),
@@ -199,7 +199,7 @@ impl Evaluator {
     let value_head = ValueHead {
       v1_conv: ConvLayer::new(ctx, &vh.v1_conv),
       v1_bn: BnActLayer::new(ctx, &vh.v1_bn, &vh.v1_activation),
-      gpool: GpoolLayer::new(ctx),
+      gpool: ValueHeadGpoolLayer::new(ctx),
       v2_mul: MatMulLayer::new(ctx, &vh.v2_mul),
       v2_bias: MatBiasLayer::new(ctx, &vh.v2_bias),
       v2_act,
@@ -556,27 +556,48 @@ impl Evaluator {
     let v2_out = GpuTensor::zeros(ctx, (v2_out_ch * n) as usize);
     vh.v2_mul.dispatch(ctx, &mut enc, n, &v1_agg, &v2_out);
     vh.v2_bias.dispatch(ctx, &mut enc, n, &v2_out);
-    // v2 activation is applied on CPU after download (simple; avoids extra pass)
 
-    // v3: value outputs
-    let value_out = GpuTensor::zeros(ctx, (self.value_ch * n) as usize);
-    vh.v3_mul.dispatch(ctx, &mut enc, n, &v2_out, &value_out);
-    vh.v3_bias.dispatch(ctx, &mut enc, n, &value_out);
-
-    // sv3: score value outputs
-    let score_out = GpuTensor::zeros(ctx, (self.score_ch * n) as usize);
-    vh.sv3_mul.dispatch(ctx, &mut enc, n, &v2_out, &score_out);
-    vh.sv3_bias.dispatch(ctx, &mut enc, n, &score_out);
-
-    // ownership conv
+    // ownership conv (queued before the v2 activation CPU round-trip)
     let own_out = GpuTensor::zeros(ctx, (n * self.ownership_ch * hw) as usize);
     vh.ownership_conv
       .dispatch(ctx, &mut enc, n, h, w, &v1_bn_out, &own_out, false);
 
     // ------------------------------------------------------------------
-    // 6. Submit and read back
+    // 6. Submit everything up to (including) v2_bias, then apply v2
+    //    activation on the CPU before feeding v3 / sv3.
     // ------------------------------------------------------------------
     ctx.queue.submit([enc.finish()]);
+
+    // Apply v2 activation in-place on the CPU.
+    #[cfg(not(target_arch = "wasm32"))]
+    let v2_activated = {
+      let mut data = v2_out.download(ctx);
+      match vh.v2_act {
+        1 => { for x in &mut data { *x = x.max(0.0); } }   // ReLU
+        2 => { for x in &mut data { *x = mish(*x); } }     // Mish
+        _ => {}                                              // Identity
+      }
+      GpuTensor::from_slice(ctx, &data)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let v2_activated = v2_out; // WASM: async API needed; activation skipped here
+
+    // Encode v3 / sv3 in a new command encoder.
+    let mut enc2 = ctx.device.create_command_encoder(
+      &wgpu::CommandEncoderDescriptor { label: Some("forward_v3") },
+    );
+
+    // v3: value outputs
+    let value_out = GpuTensor::zeros(ctx, (self.value_ch * n) as usize);
+    vh.v3_mul.dispatch(ctx, &mut enc2, n, &v2_activated, &value_out);
+    vh.v3_bias.dispatch(ctx, &mut enc2, n, &value_out);
+
+    // sv3: score value outputs
+    let score_out = GpuTensor::zeros(ctx, (self.score_ch * n) as usize);
+    vh.sv3_mul.dispatch(ctx, &mut enc2, n, &v2_activated, &score_out);
+    vh.sv3_bias.dispatch(ctx, &mut enc2, n, &score_out);
+
+    ctx.queue.submit([enc2.finish()]);
 
     #[cfg(not(target_arch = "wasm32"))]
     {

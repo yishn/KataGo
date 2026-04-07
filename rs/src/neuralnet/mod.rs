@@ -25,6 +25,7 @@ mod shaders {
   pub const CONV: &str = include_str!("shaders/conv.wgsl");
   pub const BN_ACT: &str = include_str!("shaders/bn_act.wgsl");
   pub const GPOOL: &str = include_str!("shaders/gpool.wgsl");
+  pub const GPOOL_VALUE_HEAD: &str = include_str!("shaders/gpool_value_head.wgsl");
   pub const MATMUL: &str = include_str!("shaders/matmul.wgsl");
   pub const BIAS_ADD: &str = include_str!("shaders/bias_add.wgsl");
 }

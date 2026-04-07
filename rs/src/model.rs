@@ -1351,6 +1351,126 @@ mod tests {
   // TokenReader unit tests
   // -----------------------------------------------------------------------
 
+  // -----------------------------------------------------------------------
+  // ConvLayerDesc weight-reordering tests
+  //
+  // model.rs::ConvLayerDesc::parse reads weights from the file in
+  // [y, x, ic, oc] order and reorders them to the GPU-ready [oc, ic, y, x]
+  // order before storing in desc.weights.  These tests pin down that contract
+  // so that layers.rs can rely on desc.weights being in [oc, ic, y, x] order
+  // (i.e. it must NOT apply another permutation).
+  // -----------------------------------------------------------------------
+
+  /// Helper: parse a 1×1 ConvLayerDesc from an in-memory text stream.
+  fn parse_conv_1x1(ky: i32, kx: i32, ic: i32, oc: i32, weights_row_major: &[f32]) -> ConvLayerDesc {
+    use std::io::Cursor;
+    // Build a text-format stream: name ky kx ic oc dilY dilX [weights...]
+    let mut s = format!("testconv {ky} {kx} {ic} {oc} 1 1");
+    for &w in weights_row_major {
+      s.push_str(&format!(" {w}"));
+    }
+    let mut reader = TokenReader::new(Cursor::new(s.into_bytes()), false);
+    ConvLayerDesc::parse(&mut reader).expect("parse failed")
+  }
+
+  /// For a 1×1 conv with Cin=2, Cout=2, verify that the weight reordering
+  /// transforms the file's [y=0, x=0, ic, oc] order into [oc, ic, y=0, x=0].
+  ///
+  /// File (disk) layout — values in iteration order y,x,ic,oc:
+  ///   [w(ic=0,oc=0), w(ic=0,oc=1), w(ic=1,oc=0), w(ic=1,oc=1)]
+  ///   = [a=1, b=2, c=3, d=4]
+  ///
+  /// Expected GPU [oc, ic, y, x] layout:
+  ///   pos 0 = W[oc=0, ic=0] = a = 1
+  ///   pos 1 = W[oc=0, ic=1] = c = 3
+  ///   pos 2 = W[oc=1, ic=0] = b = 2
+  ///   pos 3 = W[oc=1, ic=1] = d = 4
+  #[test]
+  fn conv_weights_reordered_to_oc_ic_y_x() {
+    // File order [y=0, x=0, ic, oc]: a=1, b=2, c=3, d=4
+    //  W(ic=0→oc=0)=1, W(ic=0→oc=1)=2, W(ic=1→oc=0)=3, W(ic=1→oc=1)=4
+    let desc = parse_conv_1x1(1, 1, 2, 2, &[1.0, 2.0, 3.0, 4.0]);
+
+    // After reordering to [oc, ic, y, x]:
+    //   [oc=0,ic=0]=1  [oc=0,ic=1]=3  [oc=1,ic=0]=2  [oc=1,ic=1]=4
+    assert_eq!(
+      desc.weights,
+      vec![1.0f32, 3.0, 2.0, 4.0],
+      "desc.weights must be in [oc, ic, y, x] order; got {:?}",
+      desc.weights
+    );
+  }
+
+  /// Verifies that model.rs correctly handles off-diagonal weights for a 3×3
+  /// kernel with Cin=1, Cout=2.  File order iterates y,x,ic,oc:
+  ///   kernel[y,x,ic=0,oc=0] then kernel[y,x,ic=0,oc=1] for all (y,x).
+  /// After reordering:
+  ///   GPU[oc=0, ic=0, y, x] = kernel[y,x,0,0]  (first 9 values of file)
+  ///   GPU[oc=1, ic=0, y, x] = kernel[y,x,0,1]  (second 9 values of file)
+  #[test]
+  fn conv_3x3_weights_reordered_correctly() {
+    // Build file-order weights: 9 (y,x) positions × 1 ic × 2 oc = 18 values
+    // File order: for each (y,x), ic=0,oc=0 then ic=0,oc=1
+    // Use index*10 for oc=0, index*10+1 for oc=1, where index=(y*3+x)
+    let ky = 3i32; let kx = 3i32; let ic = 1i32; let oc_n = 2i32;
+    let mut file_weights = Vec::new();
+    for y in 0..ky {
+      for x in 0..kx {
+        let idx = (y * kx + x) as f32;
+        file_weights.push(idx * 10.0);   // W(y,x, ic=0, oc=0)
+        file_weights.push(idx * 10.0 + 1.0); // W(y,x, ic=0, oc=1)
+      }
+    }
+    let desc = parse_conv_1x1(ky, kx, ic, oc_n, &file_weights);
+
+    // After [oc, ic, y, x] reordering:
+    //   GPU positions 0..8  = W[oc=0, ic=0, y=0..2, x=0..2] = [0,10,20,30,40,50,60,70,80]
+    //   GPU positions 9..17 = W[oc=1, ic=0, y=0..2, x=0..2] = [1,11,21,31,41,51,61,71,81]
+    let expected_oc0: Vec<f32> = (0..9).map(|i| i as f32 * 10.0).collect();
+    let expected_oc1: Vec<f32> = (0..9).map(|i| i as f32 * 10.0 + 1.0).collect();
+    assert_eq!(&desc.weights[0..9], &expected_oc0[..],
+      "oc=0 weights wrong: {:?}", &desc.weights[0..9]);
+    assert_eq!(&desc.weights[9..18], &expected_oc1[..],
+      "oc=1 weights wrong: {:?}", &desc.weights[9..18]);
+  }
+
+  // -----------------------------------------------------------------------
+  // MatMulLayerDesc weight-layout test
+  //
+  // model.rs stores MatMul weights in [ic, oc] order directly from the file.
+  // layers.rs uploads these to the GPU and the matmul.wgsl shader reads them
+  // as [oc, ic] (weights[oc * K + ic]).  This means the shader receives the
+  // transposed weight matrix.
+  //
+  // This test documents the current [ic, oc] storage contract so that the
+  // transposition needed in MatMulLayer::new is clearly visible.
+  // -----------------------------------------------------------------------
+  #[test]
+  fn matmul_weights_stored_as_ic_oc() {
+    use std::io::Cursor;
+    // Build a text stream: name ic=2 oc=3  weights in [ic, oc] file order
+    // File: W[ic=0,oc=0]=1, W[ic=0,oc=1]=2, W[ic=0,oc=2]=3,
+    //        W[ic=1,oc=0]=4, W[ic=1,oc=1]=5, W[ic=1,oc=2]=6
+    let s = "testmul 2 3 1 2 3 4 5 6";
+    let mut reader = TokenReader::new(Cursor::new(s.as_bytes()), false);
+    let desc = MatMulLayerDesc::parse(&mut reader).expect("parse failed");
+
+    // Weights are stored in [ic, oc] order — same as file order
+    assert_eq!(
+      desc.weights,
+      vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+      "MatMulLayerDesc weights must be in [ic, oc] order"
+    );
+
+    // NOTE: matmul.wgsl reads weights[oc * in_channels + ic] which treats
+    // the buffer as [oc, ic].  Since desc.weights is [ic, oc], MatMulLayer::new
+    // must transpose before uploading.  Failure to do so is Bug 2.
+    let oc0_ic0 = desc.weights[0 * 3 + 0]; // W[ic=0, oc=0] in [ic, oc] layout
+    assert_eq!(oc0_ic0, 1.0, "W[ic=0,oc=0] should be at position 0");
+    let oc0_ic1 = desc.weights[1 * 3 + 0]; // W[ic=1, oc=0] in [ic, oc] layout
+    assert_eq!(oc0_ic1, 4.0, "W[ic=1,oc=0] should be at position 3");
+  }
+
   #[test]
   fn token_reader_reads_text_tokens() {
     let data = b"hello 42 3.14";
