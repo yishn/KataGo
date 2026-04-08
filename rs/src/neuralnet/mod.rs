@@ -9,4 +9,6 @@
 ///   index `(n, y, x, c)` → `n*H*W*C + y*W*C + x*C + c`.
 
 pub mod eval;
+pub mod genmove;
 pub mod layers;
+pub mod nninputs;
