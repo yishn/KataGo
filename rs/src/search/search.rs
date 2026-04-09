@@ -11,7 +11,7 @@ use crate::game::board::{Board, Loc, PASS_LOC, Player};
 use crate::game::boardhistory::BoardHistory;
 use crate::neuralnet::eval::{EvalOutput, Evaluator};
 use crate::search::distributiontable::DistributionTable;
-use crate::search::nnoutput::{
+use crate::neuralnet::nnoutput::{
   NNOutput, NUM_GLOBAL_FEATURES, NUM_SPATIAL_FEATURES, extract_nn_output,
   fill_row_v7, loc_to_pos,
 };

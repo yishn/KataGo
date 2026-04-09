@@ -7,7 +7,7 @@
 use crate::game::board::{Board, Loc, PASS_LOC, Player, location};
 use crate::game::boardhistory::BoardHistory;
 use crate::neuralnet::{eval::Evaluator, nninputs};
-use crate::search::nnoutput::{self, NNOutput};
+use crate::neuralnet::nnoutput::{self, NNOutput};
 
 // ---------------------------------------------------------------------------
 // Public API

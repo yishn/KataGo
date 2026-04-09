@@ -14,3 +14,4 @@ pub mod backend_wgpu;
 pub mod eval;
 pub mod layers;
 pub mod nninputs;
+pub mod nnoutput;

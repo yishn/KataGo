@@ -1,7 +1,7 @@
 /// MCTS tree node and related types.
 /// Mirrors `cpp/search/searchnode.h` (simplified for single-threaded use).
 use crate::game::board::{Loc, PASS_LOC, Player};
-use crate::search::nnoutput::NNOutput;
+use crate::neuralnet::nnoutput::NNOutput;
 
 // -----------------------------------------------------------------------
 // NodeStats — per-node aggregated statistics

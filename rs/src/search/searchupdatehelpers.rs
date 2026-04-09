@@ -1,7 +1,7 @@
 /// Node statistics update after playouts (backpropagation).
 /// Mirrors `cpp/search/searchupdatehelpers.cpp`.
 use crate::search::distributiontable::DistributionTable;
-use crate::search::nnoutput::NNOutput;
+use crate::neuralnet::nnoutput::NNOutput;
 use crate::search::node::{NodeStats, SearchNode};
 use crate::search::params::SearchParams;
 use crate::search::scorevalue;
@@ -273,7 +273,7 @@ pub fn recompute_node_stats(
 mod tests {
   use super::*;
   use crate::game::board::Player;
-  use crate::search::nnoutput::NNOutput;
+  use crate::neuralnet::nnoutput::NNOutput;
   use crate::search::node::SearchNode;
   use crate::search::params::SearchParams;
 

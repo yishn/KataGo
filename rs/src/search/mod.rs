@@ -1,6 +1,5 @@
 pub mod distributiontable;
 pub mod node;
-pub mod nnoutput;
 pub mod params;
 pub mod scorevalue;
 pub mod search;

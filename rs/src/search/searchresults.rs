@@ -241,7 +241,7 @@ pub fn get_chosen_move_loc(
 mod tests {
   use super::*;
   use crate::game::board::{Board, Player};
-  use crate::search::nnoutput::NNOutput;
+  use crate::neuralnet::nnoutput::NNOutput;
   use crate::search::node::{ChildEdge, SearchNode};
   use crate::search::params::SearchParams;
 
