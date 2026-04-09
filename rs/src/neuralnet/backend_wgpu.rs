@@ -124,7 +124,6 @@ async fn readback_f32(
     let _ = tx.send(r);
   });
   // On native we drive the event loop ourselves; on WASM the browser does it.
-  #[cfg(not(target_arch = "wasm32"))]
   device.poll(wgpu::Maintain::Wait);
   rx.await
     .expect("GPU map_async channel closed")

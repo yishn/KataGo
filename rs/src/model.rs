@@ -1293,37 +1293,6 @@ impl ModelDesc {
     Self::load_from_bytes(&decompressed, binary_floats)
   }
 
-  /// Load a model from a `.bin.gz`, `.txt.gz`, `.bin`, or `.txt` file.
-  ///
-  /// Not available on `wasm32` targets — use [`Self::load_from_bytes`] or
-  /// [`Self::load_from_gz_bytes`] instead.
-  #[cfg(not(target_arch = "wasm32"))]
-  pub fn load_from_file(
-    path: impl AsRef<std::path::Path>,
-  ) -> Result<Self, String> {
-    let path = path.as_ref();
-    let lower = path.to_string_lossy().to_lowercase();
-
-    let raw = std::fs::read(path)
-      .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-
-    if lower.ends_with(".txt.gz")
-      || lower.ends_with(".bin.gz")
-      || lower.ends_with(".gz")
-    {
-      let binary = !lower.ends_with(".txt.gz");
-      Self::load_from_gz_bytes(&raw, binary)
-    } else if lower.ends_with(".bin") {
-      Self::load_from_bytes(&raw, true)
-    } else if lower.ends_with(".txt") {
-      Self::load_from_bytes(&raw, false)
-    } else {
-      Err(format!(
-        "unrecognised model file extension for {}",
-        path.display()
-      ))
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,7 +1331,13 @@ mod tests {
   // -----------------------------------------------------------------------
 
   /// Helper: parse a 1×1 ConvLayerDesc from an in-memory text stream.
-  fn parse_conv_1x1(ky: i32, kx: i32, ic: i32, oc: i32, weights_row_major: &[f32]) -> ConvLayerDesc {
+  fn parse_conv_1x1(
+    ky: i32,
+    kx: i32,
+    ic: i32,
+    oc: i32,
+    weights_row_major: &[f32],
+  ) -> ConvLayerDesc {
     use std::io::Cursor;
     // Build a text-format stream: name ky kx ic oc dilY dilX [weights...]
     let mut s = format!("testconv {ky} {kx} {ic} {oc} 1 1");
@@ -1412,12 +1387,15 @@ mod tests {
     // Build file-order weights: 9 (y,x) positions × 1 ic × 2 oc = 18 values
     // File order: for each (y,x), ic=0,oc=0 then ic=0,oc=1
     // Use index*10 for oc=0, index*10+1 for oc=1, where index=(y*3+x)
-    let ky = 3i32; let kx = 3i32; let ic = 1i32; let oc_n = 2i32;
+    let ky = 3i32;
+    let kx = 3i32;
+    let ic = 1i32;
+    let oc_n = 2i32;
     let mut file_weights = Vec::new();
     for y in 0..ky {
       for x in 0..kx {
         let idx = (y * kx + x) as f32;
-        file_weights.push(idx * 10.0);   // W(y,x, ic=0, oc=0)
+        file_weights.push(idx * 10.0); // W(y,x, ic=0, oc=0)
         file_weights.push(idx * 10.0 + 1.0); // W(y,x, ic=0, oc=1)
       }
     }
@@ -1427,11 +1405,20 @@ mod tests {
     //   GPU positions 0..8  = W[oc=0, ic=0, y=0..2, x=0..2] = [0,10,20,30,40,50,60,70,80]
     //   GPU positions 9..17 = W[oc=1, ic=0, y=0..2, x=0..2] = [1,11,21,31,41,51,61,71,81]
     let expected_oc0: Vec<f32> = (0..9).map(|i| i as f32 * 10.0).collect();
-    let expected_oc1: Vec<f32> = (0..9).map(|i| i as f32 * 10.0 + 1.0).collect();
-    assert_eq!(&desc.weights[0..9], &expected_oc0[..],
-      "oc=0 weights wrong: {:?}", &desc.weights[0..9]);
-    assert_eq!(&desc.weights[9..18], &expected_oc1[..],
-      "oc=1 weights wrong: {:?}", &desc.weights[9..18]);
+    let expected_oc1: Vec<f32> =
+      (0..9).map(|i| i as f32 * 10.0 + 1.0).collect();
+    assert_eq!(
+      &desc.weights[0..9],
+      &expected_oc0[..],
+      "oc=0 weights wrong: {:?}",
+      &desc.weights[0..9]
+    );
+    assert_eq!(
+      &desc.weights[9..18],
+      &expected_oc1[..],
+      "oc=1 weights wrong: {:?}",
+      &desc.weights[9..18]
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -1497,33 +1484,14 @@ mod tests {
   // File-based tests — not available on wasm32 (no filesystem)
   // -----------------------------------------------------------------------
 
-  #[cfg(not(target_arch = "wasm32"))]
   mod file_tests {
     use super::super::ModelDesc;
-
-    fn workspace_root() -> std::path::PathBuf {
-      std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace root")
-        .to_path_buf()
-    }
-
-    fn g170_bin_gz_path() -> std::path::PathBuf {
-      workspace_root()
-        .join("cpp/tests/models/g170-b6c96-s175395328-d26788732.bin.gz")
-    }
-
-    fn g170_txt_gz_path() -> std::path::PathBuf {
-      workspace_root()
-        .join("cpp/tests/models/g170-b6c96-s175395328-d26788732.txt.gz")
-    }
 
     // .network.bin.gz  (the user's model)
 
     #[test]
     fn load_network_bin_gz_succeeds() {
-      let path = workspace_root().join(".network.bin.gz");
-      let m = ModelDesc::load_from_file(&path)
+      let m = ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
         .expect("loading .network.bin.gz should succeed");
 
       assert!(
@@ -1544,7 +1512,7 @@ mod tests {
     #[test]
     fn network_trunk_channel_counts_are_consistent() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
           .unwrap();
 
       assert_eq!(
@@ -1573,7 +1541,7 @@ mod tests {
     #[test]
     fn network_policy_head_shapes_are_valid() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
           .unwrap();
       let ph = &m.policy_head;
 
@@ -1586,7 +1554,7 @@ mod tests {
     #[test]
     fn network_value_head_shapes_are_valid() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
           .unwrap();
       let vh = &m.value_head;
 
@@ -1601,7 +1569,7 @@ mod tests {
     #[test]
     fn network_conv_weights_have_correct_size() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
           .unwrap();
       let ic = &m.trunk.initial_conv;
       let expected =
@@ -1617,7 +1585,7 @@ mod tests {
     #[test]
     fn network_bn_merged_params_are_finite() {
       let m =
-        ModelDesc::load_from_file(workspace_root().join(".network.bin.gz"))
+        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
           .unwrap();
       let bn = &m.trunk.trunk_tip_bn;
       for (i, (&s, &b)) in bn
@@ -1635,7 +1603,7 @@ mod tests {
 
     #[test]
     fn load_g170_bin_gz_succeeds() {
-      let m = ModelDesc::load_from_file(g170_bin_gz_path())
+      let m = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170-b6c96-s175395328-d26788732.bin.gz"), true)
         .expect("loading g170 bin.gz should succeed");
       assert!(m.model_version >= 3);
       assert!(!m.trunk.blocks.is_empty());
@@ -1643,7 +1611,7 @@ mod tests {
 
     #[test]
     fn load_g170_txt_gz_succeeds() {
-      let m = ModelDesc::load_from_file(g170_txt_gz_path())
+      let m = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170-b6c96-s175395328-d26788732.txt.gz"), false)
         .expect("loading g170 txt.gz should succeed");
       assert!(m.model_version >= 3);
       assert!(!m.trunk.blocks.is_empty());
@@ -1653,8 +1621,8 @@ mod tests {
     /// metadata and first few weight values.
     #[test]
     fn g170_bin_and_txt_are_consistent() {
-      let mb = ModelDesc::load_from_file(g170_bin_gz_path()).unwrap();
-      let mt = ModelDesc::load_from_file(g170_txt_gz_path()).unwrap();
+      let mb = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170-b6c96-s175395328-d26788732.bin.gz"), true).unwrap();
+      let mt = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170-b6c96-s175395328-d26788732.txt.gz"), false).unwrap();
 
       // The two files have slightly different embedded names; compare structure.
       assert_eq!(mb.model_version, mt.model_version);
@@ -1680,9 +1648,7 @@ mod tests {
 
     #[test]
     fn load_g170e_bin_gz_succeeds() {
-      let path = workspace_root()
-        .join("cpp/tests/models/g170e-b10c128-s1141046784-d204142634.bin.gz");
-      let m = ModelDesc::load_from_file(path)
+      let m = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170e-b10c128-s1141046784-d204142634.bin.gz"), true)
         .expect("loading g170e bin.gz should succeed");
       assert!(m.model_version >= 3);
       assert_eq!(m.trunk.trunk_num_channels, 128);
