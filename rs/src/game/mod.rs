@@ -5,7 +5,6 @@
 
 pub mod board;
 pub mod boardhistory;
-pub mod graphhash;
 pub mod rules;
 
 // ---------------------------------------------------------------------------

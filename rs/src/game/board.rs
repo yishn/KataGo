@@ -16,7 +16,7 @@
 /// chain; `chain_data[head]` holds `{owner, num_locs, num_liberties}`.
 use std::sync::OnceLock;
 
-use crate::game::{Hash128, rules::Rules};
+use crate::game::Hash128;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -137,13 +137,8 @@ pub struct CaptureRecord {
 struct ZobristTables {
   board_hash: [[Hash128; 4]; MAX_ARR_SIZE],
   ko_loc_hash: [Hash128; MAX_ARR_SIZE],
-  player_hash: [Hash128; 4],
-  encore_hash: [Hash128; 3],
-  ko_mark_hash: [[Hash128; 4]; MAX_ARR_SIZE],
-  second_encore_start_hash: [[Hash128; 4]; MAX_ARR_SIZE],
   size_x_hash: [Hash128; MAX_LEN + 1],
   size_y_hash: [Hash128; MAX_LEN + 1],
-  board_hash2: [[Hash128; 4]; MAX_ARR_SIZE],
 }
 
 mod generated {
@@ -151,9 +146,8 @@ mod generated {
 }
 
 pub use generated::{
+  ZOBRIST_KO_LOC_HASH, ZOBRIST_KO_MARK_HASH as KO_MARK_HASH,
   ZOBRIST_PLAYER_HASH,
-  ZOBRIST_KO_MARK_HASH as KO_MARK_HASH,
-  ZOBRIST_KO_LOC_HASH,
 };
 
 static ZOBRIST: OnceLock<ZobristTables> = OnceLock::new();
@@ -162,13 +156,8 @@ fn zobrist() -> &'static ZobristTables {
   ZOBRIST.get_or_init(|| ZobristTables {
     board_hash: generated::ZOBRIST_BOARD_HASH,
     ko_loc_hash: generated::ZOBRIST_KO_LOC_HASH,
-    player_hash: generated::ZOBRIST_PLAYER_HASH,
-    encore_hash: generated::ZOBRIST_ENCORE_HASH,
-    ko_mark_hash: generated::ZOBRIST_KO_MARK_HASH,
-    second_encore_start_hash: generated::ZOBRIST_SECOND_ENCORE_START_HASH,
     size_x_hash: generated::ZOBRIST_SIZE_X_HASH,
     size_y_hash: generated::ZOBRIST_SIZE_Y_HASH,
-    board_hash2: generated::ZOBRIST_BOARD_HASH2,
   })
 }
 
@@ -301,7 +290,9 @@ impl Board {
   // -----------------------------------------------------------------------
 
   pub fn on_board(&self, loc: Loc) -> bool {
-    loc != NULL_LOC && loc != PASS_LOC && self.colors[loc as usize] != Color::Wall
+    loc != NULL_LOC
+      && loc != PASS_LOC
+      && self.colors[loc as usize] != Color::Wall
   }
 
   pub fn get_chain_size(&self, loc: Loc) -> u16 {
@@ -318,10 +309,18 @@ impl Board {
     let c = &self.colors;
     let a = &self.adj;
     let mut cnt = 0u16;
-    if c[(l as i16 + a[0]) as usize] == Color::Empty { cnt += 1; }
-    if c[(l as i16 + a[1]) as usize] == Color::Empty { cnt += 1; }
-    if c[(l as i16 + a[2]) as usize] == Color::Empty { cnt += 1; }
-    if c[(l as i16 + a[3]) as usize] == Color::Empty { cnt += 1; }
+    if c[(l as i16 + a[0]) as usize] == Color::Empty {
+      cnt += 1;
+    }
+    if c[(l as i16 + a[1]) as usize] == Color::Empty {
+      cnt += 1;
+    }
+    if c[(l as i16 + a[2]) as usize] == Color::Empty {
+      cnt += 1;
+    }
+    if c[(l as i16 + a[3]) as usize] == Color::Empty {
+      cnt += 1;
+    }
     cnt
   }
 
@@ -342,10 +341,14 @@ impl Board {
       if c == Color::Empty {
         return false; // has a liberty
       }
-      if c == pla_color && self.chain_data[self.chain_head[adj] as usize].num_liberties > 1 {
+      if c == pla_color
+        && self.chain_data[self.chain_head[adj] as usize].num_liberties > 1
+      {
         return false; // friendly chain has liberties to spare
       }
-      if c == opp_color && self.chain_data[self.chain_head[adj] as usize].num_liberties == 1 {
+      if c == opp_color
+        && self.chain_data[self.chain_head[adj] as usize].num_liberties == 1
+      {
         return false; // captures an opponent chain
       }
     }
@@ -370,7 +373,8 @@ impl Board {
         c if c == opp_color => {
           if self.chain_data[self.chain_head[adj] as usize].num_liberties == 1 {
             num_captures += 1;
-            let captured_size = self.chain_data[self.chain_head[adj] as usize].num_locs;
+            let captured_size =
+              self.chain_data[self.chain_head[adj] as usize].num_locs;
             if captured_size > 1 || num_captures > 1 {
               return false; // not a single-stone capture
             }
@@ -388,7 +392,12 @@ impl Board {
     self.ko_loc == loc
   }
 
-  pub fn is_legal(&self, loc: Loc, pla: Player, multi_stone_suicide_legal: bool) -> bool {
+  pub fn is_legal(
+    &self,
+    loc: Loc,
+    pla: Player,
+    multi_stone_suicide_legal: bool,
+  ) -> bool {
     if loc == PASS_LOC {
       return true;
     }
@@ -425,10 +434,13 @@ impl Board {
     }
     // Diagonals: at most one non-pla cell allowed (board edge or friendly stone).
     let diag_offsets = location::all_offsets(self.x_size);
-    let bad_diags = diag_offsets[4..].iter().filter(|&&off| {
-      let c = self.colors[(loc as i16 + off) as usize];
-      c != pla_color && c != Color::Wall
-    }).count();
+    let bad_diags = diag_offsets[4..]
+      .iter()
+      .filter(|&&off| {
+        let c = self.colors[(loc as i16 + off) as usize];
+        c != pla_color && c != Color::Wall
+      })
+      .count();
     bad_diags <= 1
   }
 
@@ -462,7 +474,9 @@ impl Board {
           h ^= z.board_hash[cur as usize][opp_color as usize];
           h ^= z.board_hash[cur as usize][Color::Empty as usize];
           cur = self.next_in_chain[cur as usize];
-          if cur == head { break; }
+          if cur == head {
+            break;
+          }
         }
       }
     }
@@ -494,11 +508,14 @@ impl Board {
     debug_assert_ne!(h1, h2);
 
     // Keep the larger chain as h1.
-    if self.chain_data[h1 as usize].num_locs < self.chain_data[h2 as usize].num_locs {
+    if self.chain_data[h1 as usize].num_locs
+      < self.chain_data[h2 as usize].num_locs
+    {
       std::mem::swap(&mut h1, &mut h2);
     }
 
-    self.chain_data[h1 as usize].num_locs += self.chain_data[h2 as usize].num_locs;
+    self.chain_data[h1 as usize].num_locs +=
+      self.chain_data[h2 as usize].num_locs;
 
     // Count new liberties contributed by h2's group.
     let mut new_libs = 0u16;
@@ -506,12 +523,16 @@ impl Board {
     loop {
       for &off in &self.adj {
         let adj = (cur as i16 + off) as usize;
-        if self.colors[adj] == Color::Empty && !self.is_liberty_of(adj as Loc, h1) {
+        if self.colors[adj] == Color::Empty
+          && !self.is_liberty_of(adj as Loc, h1)
+        {
           new_libs += 1;
         }
       }
       self.chain_head[cur as usize] = h1;
-      if self.next_in_chain[cur as usize] == h2 { break; }
+      if self.next_in_chain[cur as usize] == h2 {
+        break;
+      }
       cur = self.next_in_chain[cur as usize];
     }
     self.chain_data[h1 as usize].num_liberties += new_libs;
@@ -534,14 +555,21 @@ impl Board {
         }
       }
       cur = self.next_in_chain[cur as usize];
-      if cur == head { break; }
+      if cur == head {
+        break;
+      }
     }
     false
   }
 
   /// Adjust the liberty count of every distinct `pla`-chain adjacent to `loc`
   /// by `delta`.  Avoids double-counting chains that touch `loc` multiple times.
-  fn change_surrounding_liberties(&mut self, loc: Loc, pla: Player, delta: i16) {
+  fn change_surrounding_liberties(
+    &mut self,
+    loc: Loc,
+    pla: Player,
+    delta: i16,
+  ) {
     let pla_color = pla.color();
     let a = self.adj;
     let adjs = [
@@ -579,13 +607,18 @@ impl Board {
       self.pos_hash ^= z.board_hash[cur as usize][Color::Empty as usize];
 
       // Free adjacent chains' liberties.
-      let opp = match color { Color::Black => Player::White, _ => Player::Black };
+      let opp = match color {
+        Color::Black => Player::White,
+        _ => Player::Black,
+      };
       self.change_surrounding_liberties(cur, opp, 1);
 
       self.colors[cur as usize] = Color::Empty;
 
       let next = self.next_in_chain[cur as usize];
-      if next == head { break; }
+      if next == head {
+        break;
+      }
       cur = next;
     }
 
@@ -602,7 +635,11 @@ impl Board {
 
   /// Play `loc` for `pla`, assuming it is legal.  Returns a `MoveRecord`
   /// that can be passed to `undo()`.
-  pub fn play_move_assume_legal(&mut self, loc: Loc, pla: Player) -> MoveRecord {
+  pub fn play_move_assume_legal(
+    &mut self,
+    loc: Loc,
+    pla: Player,
+  ) -> MoveRecord {
     if loc == PASS_LOC {
       let rec = MoveRecord {
         loc,
@@ -667,9 +704,15 @@ impl Board {
         loop {
           locs.push(cur);
           cur = self.next_in_chain[cur as usize];
-          if cur == head { break; }
+          if cur == head {
+            break;
+          }
         }
-        captures.push(CaptureRecord { head, color: opp_color, locs });
+        captures.push(CaptureRecord {
+          head,
+          color: opp_color,
+          locs,
+        });
         self.remove_chain(head);
       }
     }
@@ -730,10 +773,7 @@ impl Board {
 
   /// Undo the move described by `rec`, restoring the board to its prior state.
   pub fn undo(&mut self, rec: &MoveRecord) {
-    let z = zobrist();
-    let pla = rec.player;
-    let pla_color = pla.color();
-    let opp_color = pla.opponent().color();
+    let _pla = rec.player;
 
     // Restore captures first.
     for cap in rec.captures.iter().rev() {
@@ -840,7 +880,12 @@ impl Board {
 
   /// Returns the number of liberties the stone at `loc` would have after
   /// playing `pla` there, capped at `cap`.  Used for ladder and ko detection.
-  pub fn get_num_liberties_after_play(&self, loc: Loc, pla: Player, cap: u16) -> u16 {
+  pub fn get_num_liberties_after_play(
+    &self,
+    loc: Loc,
+    pla: Player,
+    cap: u16,
+  ) -> u16 {
     if !self.on_board(loc) || self.colors[loc as usize] != Color::Empty {
       return 0;
     }
@@ -852,7 +897,9 @@ impl Board {
     for &off in &self.adj {
       let adj = (loc as i16 + off) as usize;
       match self.colors[adj] {
-        Color::Empty => { lib_set.insert(adj); }
+        Color::Empty => {
+          lib_set.insert(adj);
+        }
         c if c == pla_color => {
           // Add liberties of friendly chain, excluding `loc` itself.
           let head = self.chain_head[adj];
@@ -865,7 +912,9 @@ impl Board {
               }
             }
             cur = self.next_in_chain[cur as usize];
-            if cur == head { break; }
+            if cur == head {
+              break;
+            }
           }
         }
         c if c == opp_color => {
@@ -878,7 +927,9 @@ impl Board {
                 lib_set.insert(cur as usize);
               }
               cur = self.next_in_chain[cur as usize];
-              if cur == head { break; }
+              if cur == head {
+                break;
+              }
             }
           }
         }
@@ -916,14 +967,15 @@ impl Board {
 
     // ----- Step 1: basic flood-fill to find empty regions -----
     // Each empty region is labelled; we track which player's stones border it.
-    const MAX_REGIONS: usize = MAX_ARR_SIZE;
     let mut region_id = [i16::MAX; MAX_ARR_SIZE];
     let mut regions: Vec<RegionInfo> = Vec::new();
 
     for y in 0..y_size {
       for x in 0..x_size {
         let loc = location::get_loc(x, y, x_size);
-        if self.colors[loc as usize] != Color::Empty || region_id[loc as usize] != i16::MAX {
+        if self.colors[loc as usize] != Color::Empty
+          || region_id[loc as usize] != i16::MAX
+        {
           continue;
         }
         let rid = regions.len() as i16;
@@ -949,7 +1001,6 @@ impl Board {
           }
         }
         regions.push(RegionInfo {
-          locs: q,
           borders_black,
           borders_white,
         });
@@ -990,7 +1041,9 @@ impl Board {
             visited[cur as usize] = true;
             chain_locs.push(cur);
             cur = self.next_in_chain[cur as usize];
-            if cur as usize == head { break; }
+            if cur as usize == head {
+              break;
+            }
           }
 
           // Count vital regions (surrounded by at least 2 pla stones, no opp stones).
@@ -1001,13 +1054,17 @@ impl Board {
               let a = (s as i16 + off) as usize;
               if self.colors[a] == Color::Empty {
                 let rid = region_id[a];
-                if rid == i16::MAX { continue; }
+                if rid == i16::MAX {
+                  continue;
+                }
                 let ri = &regions[rid as usize];
                 let vital = match pla {
                   Player::Black => !ri.borders_white,
                   Player::White => !ri.borders_black,
                 };
-                if vital { vital_regions.insert(rid); }
+                if vital {
+                  vital_regions.insert(rid);
+                }
               }
             }
           }
@@ -1021,7 +1078,9 @@ impl Board {
           }
         }
       }
-      if !changed { break; }
+      if !changed {
+        break;
+      }
     }
 
     // ----- Step 3: assign ownership -----
@@ -1040,7 +1099,9 @@ impl Board {
           }
           Color::Empty => {
             let rid = region_id[loc];
-            if rid == i16::MAX { continue; }
+            if rid == i16::MAX {
+              continue;
+            }
             let ri = &regions[rid as usize];
             if !safe_big_territories && !unsafe_big_territories {
               // Only definitely enclosed territory.
@@ -1088,7 +1149,14 @@ impl Board {
     const MAX_NODES: usize = 25_000;
     let mut board = self.clone();
     let mut node_count = 0usize;
-    Self::ladder_search_inner(&mut board, loc, pla, libs, &mut node_count, MAX_NODES)
+    Self::ladder_search_inner(
+      &mut board,
+      loc,
+      pla,
+      libs,
+      &mut node_count,
+      MAX_NODES,
+    )
   }
 
   fn ladder_search_inner(
@@ -1106,14 +1174,22 @@ impl Board {
 
     let opp = pla.opponent();
 
-    if libs <= 0 { return true; }
-    if libs >= 3 { return false; }
+    if libs <= 0 {
+      return true;
+    }
+    if libs >= 3 {
+      return false;
+    }
 
     if libs == 1 {
       // Defender: try to escape to the single liberty.
       let liberty = board.find_liberty(loc, pla);
-      let Some(escape) = liberty else { return true; };
-      if !board.is_legal(escape, pla, true) { return true; }
+      let Some(escape) = liberty else {
+        return true;
+      };
+      if !board.is_legal(escape, pla, true) {
+        return true;
+      }
       let rec_def = board.play_move_assume_legal(escape, pla);
       let after_def_libs = board.get_num_liberties(escape);
       if after_def_libs == 0 {
@@ -1131,17 +1207,31 @@ impl Board {
       board.find_two_liberties(escape, pla, &mut atk1, &mut atk2);
       let mut attacker_wins = false;
       for &atk in &[atk1, atk2] {
-        if atk == NULL_LOC { continue; }
-        if !board.is_legal(atk, opp, true) { continue; }
+        if atk == NULL_LOC {
+          continue;
+        }
+        if !board.is_legal(atk, opp, true) {
+          continue;
+        }
         let rec_atk = board.play_move_assume_legal(atk, opp);
         let remaining_libs = board.get_num_liberties(escape);
         let captured = if remaining_libs == 0 {
           true
         } else {
-          Self::ladder_search_inner(board, escape, pla, remaining_libs, node_count, max_nodes)
+          Self::ladder_search_inner(
+            board,
+            escape,
+            pla,
+            remaining_libs,
+            node_count,
+            max_nodes,
+          )
         };
         board.undo(&rec_atk);
-        if captured { attacker_wins = true; break; }
+        if captured {
+          attacker_wins = true;
+          break;
+        }
       }
       board.undo(&rec_def);
       return attacker_wins;
@@ -1154,16 +1244,25 @@ impl Board {
 
     // Try both attacking moves.
     for &atk in &[lib1, lib2] {
-      if atk == NULL_LOC { continue; }
-      if !board.is_legal(atk, opp, true) { continue; }
+      if atk == NULL_LOC {
+        continue;
+      }
+      if !board.is_legal(atk, opp, true) {
+        continue;
+      }
       let rec = board.play_move_assume_legal(atk, opp);
       let new_libs = board.get_num_liberties(loc);
-      let captured = if new_libs == 0 { true }
-      else {
-        Self::ladder_search_inner(board, loc, pla, new_libs, node_count, max_nodes)
+      let captured = if new_libs == 0 {
+        true
+      } else {
+        Self::ladder_search_inner(
+          board, loc, pla, new_libs, node_count, max_nodes,
+        )
       };
       board.undo(&rec);
-      if captured { return true; } // attacker found a working move
+      if captured {
+        return true;
+      } // attacker found a working move
     }
     false // defender can escape via one of the liberties
   }
@@ -1180,13 +1279,21 @@ impl Board {
         }
       }
       cur = self.next_in_chain[cur as usize];
-      if cur == head { break; }
+      if cur == head {
+        break;
+      }
     }
     let _ = pla_color;
     None
   }
 
-  fn find_two_liberties(&self, loc: Loc, pla: Player, lib1: &mut Loc, lib2: &mut Loc) {
+  fn find_two_liberties(
+    &self,
+    loc: Loc,
+    pla: Player,
+    lib1: &mut Loc,
+    lib2: &mut Loc,
+  ) {
     let _pla_color = pla.color();
     let head = self.chain_head[loc as usize];
     let mut cur = head;
@@ -1205,7 +1312,9 @@ impl Board {
         }
       }
       cur = self.next_in_chain[cur as usize];
-      if cur == head { break; }
+      if cur == head {
+        break;
+      }
     }
   }
 
@@ -1236,7 +1345,6 @@ impl Board {
 // ---------------------------------------------------------------------------
 
 struct RegionInfo {
-  locs: Vec<Loc>,
   borders_black: bool,
   borders_white: bool,
 }
@@ -1318,7 +1426,11 @@ mod tests {
     white_at(&mut b, 2, 1);
     white_at(&mut b, 1, 0);
     white_at(&mut b, 1, 2);
-    assert_eq!(b.colors[target as usize], Color::Empty, "stone should be captured");
+    assert_eq!(
+      b.colors[target as usize],
+      Color::Empty,
+      "stone should be captured"
+    );
     assert_eq!(b.num_black_captures, 0);
     assert_eq!(b.num_white_captures, 1);
   }
@@ -1343,9 +1455,17 @@ mod tests {
     // B plays (1,2): captures W at (1,1).
     let cap = location::get_loc(1, 2, 5);
     b.play_move_assume_legal(cap, Player::Black);
-    assert_eq!(b.colors[location::get_loc(1, 1, 5) as usize], Color::Empty, "W should be captured");
+    assert_eq!(
+      b.colors[location::get_loc(1, 1, 5) as usize],
+      Color::Empty,
+      "W should be captured"
+    );
     assert_ne!(b.ko_loc, NULL_LOC, "ko should be set");
-    assert_eq!(b.ko_loc, location::get_loc(1, 1, 5), "ko at captured location");
+    assert_eq!(
+      b.ko_loc,
+      location::get_loc(1, 1, 5),
+      "ko at captured location"
+    );
   }
 
   #[test]
@@ -1362,7 +1482,10 @@ mod tests {
     b.play_move_assume_legal(cap, Player::Black);
     assert_ne!(b.ko_loc, NULL_LOC, "ko should be set");
     let ko = b.ko_loc;
-    assert!(!b.is_legal(ko, Player::White, false), "ko retake should be illegal");
+    assert!(
+      !b.is_legal(ko, Player::White, false),
+      "ko retake should be illegal"
+    );
   }
 
   #[test]
@@ -1386,10 +1509,19 @@ mod tests {
     white_at(&mut b, 2, 1);
     let hash_before = b.pos_hash;
     let captures_before = b.num_black_captures;
-    let rec = b.play_move_assume_legal(location::get_loc(2, 3, 5), Player::White);
-    assert_eq!(b.colors[target as usize], Color::Empty, "should be captured");
+    let rec =
+      b.play_move_assume_legal(location::get_loc(2, 3, 5), Player::White);
+    assert_eq!(
+      b.colors[target as usize],
+      Color::Empty,
+      "should be captured"
+    );
     b.undo(&rec);
-    assert_eq!(b.colors[target as usize], Color::Black, "stone should be restored");
+    assert_eq!(
+      b.colors[target as usize],
+      Color::Black,
+      "stone should be restored"
+    );
     assert_eq!(b.pos_hash, hash_before);
     assert_eq!(b.num_black_captures, captures_before);
   }
@@ -1402,9 +1534,15 @@ mod tests {
     // Two adjacent stones should form one chain.
     let loc1 = location::get_loc(3, 3, 9);
     let loc2 = location::get_loc(4, 3, 9);
-    assert_eq!(b.chain_head[loc1 as usize], b.chain_head[loc2 as usize],
-      "should be same chain");
-    assert_eq!(b.get_num_liberties(loc1), 6, "two stones in a row have 6 liberties");
+    assert_eq!(
+      b.chain_head[loc1 as usize], b.chain_head[loc2 as usize],
+      "should be same chain"
+    );
+    assert_eq!(
+      b.get_num_liberties(loc1),
+      6,
+      "two stones in a row have 6 liberties"
+    );
   }
 
   #[test]
@@ -1450,7 +1588,10 @@ mod tests {
     black_at(&mut b, 3, 3); // DR diagonal
     let eye = location::get_loc(2, 2, 5);
     assert!(b.is_simple_eye(eye, Player::Black), "should be simple eye");
-    assert!(!b.is_simple_eye(eye, Player::White), "should not be white eye");
+    assert!(
+      !b.is_simple_eye(eye, Player::White),
+      "should not be white eye"
+    );
   }
 
   #[test]
@@ -1469,7 +1610,11 @@ mod tests {
     b.calculate_area(true, false, false, &mut area);
     // (0,0) is enclosed by white — should be White territory.
     let enc = location::get_loc(0, 0, 5) as usize;
-    assert_eq!(area[enc], Color::White, "enclosed corner should be white territory");
+    assert_eq!(
+      area[enc],
+      Color::White,
+      "enclosed corner should be white territory"
+    );
   }
 
   #[test]
@@ -1482,8 +1627,10 @@ mod tests {
     black_at(&mut b, 4, 4);
     let loc = location::get_loc(4, 4, 9);
     assert_eq!(b.get_num_liberties(loc), 4);
-    assert!(!b.search_is_ladder_captured(loc, Player::Black),
-      "stone with 4 liberties should not be ladder-captured");
+    assert!(
+      !b.search_is_ladder_captured(loc, Player::Black),
+      "stone with 4 liberties should not be ladder-captured"
+    );
 
     // A stone with 2 liberties that is not a ladder (can escape freely) is not captured.
     let mut b2 = Board::new(9, 9);
@@ -1493,7 +1640,9 @@ mod tests {
     let loc2 = location::get_loc(4, 4, 9);
     assert_eq!(b2.get_num_liberties(loc2), 2);
     // B can escape into the open board — not ladder-captured.
-    assert!(!b2.search_is_ladder_captured(loc2, Player::Black),
-      "stone with 2 open liberties should not be ladder-captured");
+    assert!(
+      !b2.search_is_ladder_captured(loc2, Player::Black),
+      "stone with 2 open liberties should not be ladder-captured"
+    );
   }
 }

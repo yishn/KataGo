@@ -13,7 +13,7 @@
 /// features are faithfully encoded, which is sufficient for inference with a
 /// real model or for unit testing with synthetic weights.
 use crate::game::{
-  board::{Board, Color, Loc, Player, NULL_LOC, PASS_LOC, location},
+  board::{Board, Loc, Player, NULL_LOC, PASS_LOC, location},
   boardhistory::BoardHistory,
   rules::{KoRule, ScoringRule, TaxRule},
 };
@@ -54,27 +54,6 @@ pub fn loc_to_pos(loc: Loc, board_x: usize, nn_x: usize, nn_y: usize) -> usize {
   let x = location::get_x(loc, board_x);
   let y = location::get_y(loc, board_x);
   y * nn_x + x
-}
-
-/// NN grid position index → board `Loc`.
-/// Returns `PASS_LOC` for `pos == nn_x * nn_y`, `NULL_LOC` for out-of-board.
-#[inline]
-pub fn pos_to_loc(
-  pos: usize,
-  board_x: usize,
-  board_y: usize,
-  nn_x: usize,
-  nn_y: usize,
-) -> Loc {
-  if pos == nn_x * nn_y {
-    return PASS_LOC;
-  }
-  let x = pos % nn_x;
-  let y = pos / nn_x;
-  if x >= board_x || y >= board_y {
-    return NULL_LOC;
-  }
-  location::get_loc(x, y, board_x)
 }
 
 // ---------------------------------------------------------------------------

@@ -14,13 +14,11 @@ use crate::neuralnet::layers::Model;
 
 pub struct CpuBackend {
   model: Model,
-  nn_x: usize,
-  nn_y: usize,
 }
 
 impl CpuBackend {
   pub fn new(desc: &ModelDesc, nn_x: usize, nn_y: usize) -> Self {
-    CpuBackend { model: Model::new(desc, nn_x, nn_y), nn_x, nn_y }
+    CpuBackend { model: Model::new(desc, nn_x, nn_y) }
   }
 }
 

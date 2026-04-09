@@ -7,11 +7,10 @@
 ///
 /// This mirrors the C++ Eigen layout which is column-major [C,X,Y,N] — the
 /// element ordering is identical; only the conceptual axis labels differ.
-
 use crate::model::{
-  Activation, BatchNormLayerDesc, ConvLayerDesc, GlobalPoolingResidualBlockDesc,
-  MatBiasLayerDesc, MatMulLayerDesc, NestedBottleneckResidualBlockDesc,
-  ResidualBlockDesc, SgfMetadataEncoderDesc, BlockDesc,
+  Activation, BatchNormLayerDesc, BlockDesc, ConvLayerDesc,
+  GlobalPoolingResidualBlockDesc, MatBiasLayerDesc, MatMulLayerDesc,
+  NestedBottleneckResidualBlockDesc, ResidualBlockDesc, SgfMetadataEncoderDesc,
 };
 
 // ---------------------------------------------------------------------------
@@ -46,7 +45,12 @@ fn apply_activation(x: f32, act: Activation) -> f32 {
 
 /// Compute the sum of each batch element's mask entries.
 /// `mask`: flat [N*H*W], each element is 0 or 1.
-pub fn compute_mask_sum(mask: &[f32], nn_x: usize, nn_y: usize, n: usize) -> Vec<f32> {
+pub fn compute_mask_sum(
+  mask: &[f32],
+  nn_x: usize,
+  nn_y: usize,
+  n: usize,
+) -> Vec<f32> {
   let hw = nn_x * nn_y;
   let mut result = vec![0.0f32; n];
   for ni in 0..n {
@@ -116,7 +120,6 @@ pub struct ConvLayer {
   // Winograd metadata (zero if not using winograd)
   num_tiles_x: usize,
   num_tiles_y: usize,
-  in_tile_xy: usize,  // inTileXSize * inTileYSize
   out_tile_x: usize,
   out_tile_y: usize,
 }
@@ -176,8 +179,8 @@ impl ConvLayer {
           // Apply column transforms
           for sx in 0..in_tile_x {
             let mut a = [
-              tmp[0][sx], tmp[1][sx], tmp[2][sx],
-              tmp[3][sx], tmp[4][sx], tmp[5][sx],
+              tmp[0][sx], tmp[1][sx], tmp[2][sx], tmp[3][sx], tmp[4][sx],
+              tmp[5][sx],
             ];
             if cy == 3 {
               transform3x3_6(&mut a);
@@ -210,7 +213,6 @@ impl ConvLayer {
         kernel: trans_w,
         num_tiles_x,
         num_tiles_y,
-        in_tile_xy,
         out_tile_x,
         out_tile_y,
       }
@@ -227,7 +229,6 @@ impl ConvLayer {
         kernel: desc.weights.clone(),
         num_tiles_x: 0,
         num_tiles_y: 0,
-        in_tile_xy: 0,
         out_tile_x: 0,
         out_tile_y: 0,
       }
@@ -297,8 +298,10 @@ impl ConvLayer {
           // Gather tile from input
           for dy in 0..in_tile_y {
             for dx in 0..in_tile_x {
-              let xi = xt as isize * out_tile_x as isize + dx as isize + in_offset_x;
-              let yi = yt as isize * out_tile_y as isize + dy as isize + in_offset_y;
+              let xi =
+                xt as isize * out_tile_x as isize + dx as isize + in_offset_x;
+              let yi =
+                yt as isize * out_tile_y as isize + dy as isize + in_offset_y;
               let sub = dy * in_tile_x + dx;
               if xi < 0 || yi < 0 || xi >= w as isize || yi >= h as isize {
                 for c in 0..ic {
@@ -388,7 +391,8 @@ impl ConvLayer {
           // Gather from t_out into tile
           for sub in 0..in_tile_xy {
             for oc_i in 0..oc {
-              tile[sub * oc + oc_i] = t_out[sub * batch_tiles * oc + bt * oc + oc_i];
+              tile[sub * oc + oc_i] =
+                t_out[sub * batch_tiles * oc + bt * oc + oc_i];
             }
           }
 
@@ -498,9 +502,9 @@ impl ConvLayer {
     let z5 = a[5];
     a[0] = 4.0 * z0 - 5.0 * z2 + z4;
     a[1] = -4.0 * z1 - 4.0 * z2 + z3 + z4;
-    a[2] =  4.0 * z1 - 4.0 * z2 - z3 + z4;
+    a[2] = 4.0 * z1 - 4.0 * z2 - z3 + z4;
     a[3] = -2.0 * z1 - z2 + 2.0 * z3 + z4;
-    a[4] =  2.0 * z1 - z2 - 2.0 * z3 + z4;
+    a[4] = 2.0 * z1 - z2 - 2.0 * z3 + z4;
     a[5] = 4.0 * z1 - 5.0 * z3 + z5;
   }
 
@@ -576,14 +580,12 @@ impl ConvLayer {
                 if ix < 0 || ix >= w as isize {
                   continue;
                 }
-                let in_base =
-                  (n * h * w + iy as usize * w + ix as usize) * ic;
-                let k_base = ((oc_i * ic) * cy + sy) * cx + sx;
+                let in_base = (n * h * w + iy as usize * w + ix as usize) * ic;
                 // kernel layout: [oc, ic, cy, cx]
-                // k_base above needs to account for ic stride properly:
                 // index = oc_i * (ic * cy * cx) + ic_i * (cy * cx) + sy * cx + sx
                 for ic_i in 0..ic {
-                  let k_idx = oc_i * ic * cy * cx + ic_i * cy * cx + sy * cx + sx;
+                  let k_idx =
+                    oc_i * ic * cy * cx + ic_i * cy * cx + sy * cx + sx;
                   acc += self.kernel[k_idx] * input[in_base + ic_i];
                 }
               }
@@ -645,8 +647,13 @@ impl BatchNormLayer {
           let m = mask[pos];
           let base = pos * nc;
           for c in 0..nc {
-            let x = input[base + c] * self.merged_scale[c] + self.merged_bias[c];
-            let v = if m == 1.0 { apply_activation(x, self.activation) } else { 0.0 };
+            let x =
+              input[base + c] * self.merged_scale[c] + self.merged_bias[c];
+            let v = if m == 1.0 {
+              apply_activation(x, self.activation)
+            } else {
+              0.0
+            };
             output[base + c] = v;
           }
         }
@@ -682,7 +689,12 @@ impl MatMulLayer {
         w[oc_i * ic + ic_i] = desc.weights[ic_i * oc + oc_i];
       }
     }
-    MatMulLayer { name: desc.name.clone(), in_c: ic, out_c: oc, weights: w }
+    MatMulLayer {
+      name: desc.name.clone(),
+      in_c: ic,
+      out_c: oc,
+      weights: w,
+    }
   }
 
   /// `input`: [in_c * batch], `output`: [out_c * batch].
@@ -711,7 +723,10 @@ pub struct MatBiasLayer {
 
 impl MatBiasLayer {
   pub fn new(desc: &MatBiasLayerDesc) -> Self {
-    MatBiasLayer { name: desc.name.clone(), weights: desc.weights.clone() }
+    MatBiasLayer {
+      name: desc.name.clone(),
+      weights: desc.weights.clone(),
+    }
   }
 
   /// Add bias to `mat` in-place. `mat`: [num_channels * batch].
@@ -735,11 +750,11 @@ pub struct ActivationLayer {
 }
 
 impl ActivationLayer {
-  pub fn new(
-    name: impl Into<String>,
-    activation: Activation,
-  ) -> Self {
-    ActivationLayer { name: name.into(), activation }
+  pub fn new(name: impl Into<String>, activation: Activation) -> Self {
+    ActivationLayer {
+      name: name.into(),
+      activation,
+    }
   }
 
   pub fn apply_inplace(&self, data: &mut [f32]) {
@@ -943,8 +958,19 @@ impl ResidualBlock {
     let mut mid = vec![0.0f32; mid_elts];
     let mut mid_scratch = vec![0.0f32; mid_elts];
 
-    self.nac1.apply(trunk, scratch, &mut mid, mask, batch, nn_x, nn_y, false);
-    self.nac2.apply(&mid, &mut mid_scratch, trunk, mask, batch, nn_x, nn_y, true);
+    self
+      .nac1
+      .apply(trunk, scratch, &mut mid, mask, batch, nn_x, nn_y, false);
+    self.nac2.apply(
+      &mid,
+      &mut mid_scratch,
+      trunk,
+      mask,
+      batch,
+      nn_x,
+      nn_y,
+      true,
+    );
   }
 }
 
@@ -1009,14 +1035,54 @@ impl GlobalPoolingResidualBlock {
     let mut gpool_concat = vec![0.0f32; gpc * 3 * batch];
     let mut gpool_bias = vec![0.0f32; reg_c * batch];
 
-    self.pre_bn.apply(trunk, trunk_scratch, mask, batch, nn_x, nn_y);
-    self.regular_conv.apply(trunk_scratch, &mut regular_out, batch, false);
-    self.gpool_conv.apply(trunk_scratch, &mut gpool_out, batch, false);
-    self.gpool_bn.apply(&gpool_out.clone(), &mut gpool_out2, mask, batch, nn_x, nn_y);
-    pool_rows_gpool(&gpool_out2, &mut gpool_concat, mask, mask_sum, batch, nn_x, nn_y, gpc);
-    self.gpool_to_bias_mul.apply(&gpool_concat, &mut gpool_bias, batch);
-    add_nc_bias_inplace(&mut regular_out, &gpool_bias, batch, nn_x, nn_y, reg_c);
-    self.nac2.apply(&regular_out, &mut regular_scratch, trunk, mask, batch, nn_x, nn_y, true);
+    self
+      .pre_bn
+      .apply(trunk, trunk_scratch, mask, batch, nn_x, nn_y);
+    self
+      .regular_conv
+      .apply(trunk_scratch, &mut regular_out, batch, false);
+    self
+      .gpool_conv
+      .apply(trunk_scratch, &mut gpool_out, batch, false);
+    self.gpool_bn.apply(
+      &gpool_out.clone(),
+      &mut gpool_out2,
+      mask,
+      batch,
+      nn_x,
+      nn_y,
+    );
+    pool_rows_gpool(
+      &gpool_out2,
+      &mut gpool_concat,
+      mask,
+      mask_sum,
+      batch,
+      nn_x,
+      nn_y,
+      gpc,
+    );
+    self
+      .gpool_to_bias_mul
+      .apply(&gpool_concat, &mut gpool_bias, batch);
+    add_nc_bias_inplace(
+      &mut regular_out,
+      &gpool_bias,
+      batch,
+      nn_x,
+      nn_y,
+      reg_c,
+    );
+    self.nac2.apply(
+      &regular_out,
+      &mut regular_scratch,
+      trunk,
+      mask,
+      batch,
+      nn_x,
+      nn_y,
+      true,
+    );
   }
 }
 
@@ -1060,27 +1126,19 @@ pub struct BlockStack {
 }
 
 impl BlockStack {
-  pub fn new(
-    desc_blocks: &[BlockDesc],
-    nn_x: usize,
-    nn_y: usize,
-  ) -> Self {
+  pub fn new(desc_blocks: &[BlockDesc], nn_x: usize, nn_y: usize) -> Self {
     let mut blocks = Vec::with_capacity(desc_blocks.len());
     for bd in desc_blocks {
       let b = match bd {
         BlockDesc::Ordinary(d) => {
           ResidualBlockKind::Ordinary(ResidualBlock::new(d, nn_x, nn_y))
         }
-        BlockDesc::GlobalPooling(d) => {
-          ResidualBlockKind::GlobalPooling(
-            GlobalPoolingResidualBlock::new(d, nn_x, nn_y),
-          )
-        }
-        BlockDesc::NestedBottleneck(d) => {
-          ResidualBlockKind::NestedBottleneck(
-            NestedBottleneckResidualBlockLayer::new(d, nn_x, nn_y),
-          )
-        }
+        BlockDesc::GlobalPooling(d) => ResidualBlockKind::GlobalPooling(
+          GlobalPoolingResidualBlock::new(d, nn_x, nn_y),
+        ),
+        BlockDesc::NestedBottleneck(d) => ResidualBlockKind::NestedBottleneck(
+          NestedBottleneckResidualBlockLayer::new(d, nn_x, nn_y),
+        ),
       };
       blocks.push(b);
     }
@@ -1155,9 +1213,35 @@ impl NestedBottleneckResidualBlockLayer {
     let mut mid = vec![0.0f32; batch * hw * mid_c];
     let mut mid_scratch = vec![0.0f32; batch * hw * mid_c];
 
-    self.nac1.apply(trunk, trunk_scratch, &mut mid, mask, batch, nn_x, nn_y, false);
-    self.inner.apply(&mut mid, &mut mid_scratch, mask, mask_sum, batch, nn_x, nn_y);
-    self.nac2.apply(&mid, &mut mid_scratch, trunk, mask, batch, nn_x, nn_y, true);
+    self.nac1.apply(
+      trunk,
+      trunk_scratch,
+      &mut mid,
+      mask,
+      batch,
+      nn_x,
+      nn_y,
+      false,
+    );
+    self.inner.apply(
+      &mut mid,
+      &mut mid_scratch,
+      mask,
+      mask_sum,
+      batch,
+      nn_x,
+      nn_y,
+    );
+    self.nac2.apply(
+      &mid,
+      &mut mid_scratch,
+      trunk,
+      mask,
+      batch,
+      nn_x,
+      nn_y,
+      true,
+    );
   }
 }
 
@@ -1201,7 +1285,9 @@ impl SgfMetadataEncoder {
     self.mul1.apply(input, &mut buf1[..c1 * batch], batch);
     self.bias1.apply(&mut buf1[..c1 * batch], batch);
     self.act1.apply_inplace(&mut buf1[..c1 * batch]);
-    self.mul2.apply(&buf1[..c1 * batch], &mut buf2[..c2 * batch], batch);
+    self
+      .mul2
+      .apply(&buf1[..c1 * batch], &mut buf2[..c2 * batch], batch);
     self.bias2.apply(&mut buf2[..c2 * batch], batch);
     self.act2.apply_inplace(&mut buf2[..c2 * batch]);
     self.mul3.apply(&buf2[..c2 * batch], output, batch);
@@ -1223,12 +1309,11 @@ pub struct Trunk {
 }
 
 impl Trunk {
-  pub fn new(
-    desc: &crate::model::TrunkDesc,
-    nn_x: usize,
-    nn_y: usize,
-  ) -> Self {
-    let meta_enc = desc.sgf_metadata_encoder.as_ref().map(SgfMetadataEncoder::new);
+  pub fn new(desc: &crate::model::TrunkDesc, nn_x: usize, nn_y: usize) -> Self {
+    let meta_enc = desc
+      .sgf_metadata_encoder
+      .as_ref()
+      .map(SgfMetadataEncoder::new);
     Trunk {
       name: desc.name.clone(),
       initial_conv: ConvLayer::new(&desc.initial_conv, nn_x, nn_y),
@@ -1267,10 +1352,14 @@ impl Trunk {
     let mut mat_out = vec![0.0f32; tc * batch];
 
     // initial conv: input → trunk_scratch
-    self.initial_conv.apply(input, &mut trunk_scratch, batch, false);
+    self
+      .initial_conv
+      .apply(input, &mut trunk_scratch, batch, false);
 
     // initial mat mul: global → mat_out, then broadcast-add to trunk_scratch
-    self.initial_mat_mul.apply(input_global, &mut mat_out, batch);
+    self
+      .initial_mat_mul
+      .apply(input_global, &mut mat_out, batch);
     add_nc_bias_inplace(&mut trunk_scratch, &mat_out, batch, nn_x, nn_y, tc);
 
     // optional SGF metadata encoder
@@ -1280,11 +1369,21 @@ impl Trunk {
     }
 
     // residual block stack: flip trunk_scratch ↔ trunk_out as double-buffer
-    self.blocks.apply(&mut trunk_scratch, trunk_out, mask, mask_sum, batch, nn_x, nn_y);
+    self.blocks.apply(
+      &mut trunk_scratch,
+      trunk_out,
+      mask,
+      mask_sum,
+      batch,
+      nn_x,
+      nn_y,
+    );
 
     // final BN tip: trunk_scratch → trunk_out
     let ts_clone = trunk_scratch.clone();
-    self.trunk_tip_bn.apply(&ts_clone, trunk_out, mask, batch, nn_x, nn_y);
+    self
+      .trunk_tip_bn
+      .apply(&ts_clone, trunk_out, mask, batch, nn_x, nn_y);
   }
 }
 
@@ -1328,9 +1427,10 @@ impl PolicyHead {
         .gpool_to_pass_bias
         .as_ref()
         .map(MatBiasLayer::new),
-      pass_activation: desc.pass_activation.as_ref().map(|a| {
-        ActivationLayer::new(&a.name, a.activation)
-      }),
+      pass_activation: desc
+        .pass_activation
+        .as_ref()
+        .map(|a| ActivationLayer::new(&a.name, a.activation)),
       gpool_to_pass_mul2: desc
         .gpool_to_pass_mul2
         .as_ref()
@@ -1368,17 +1468,36 @@ impl PolicyHead {
 
     self.p1_conv.apply(trunk, &mut p1_out, batch, false);
     self.g1_conv.apply(trunk, &mut g1_out, batch, false);
-    self.g1_bn.apply(&g1_out.clone(), &mut g1_out2, mask, batch, nn_x, nn_y);
-    pool_rows_gpool(&g1_out2, &mut g1_concat, mask, mask_sum, batch, nn_x, nn_y, g1c);
-    self.gpool_to_bias_mul.apply(&g1_concat, &mut g1_bias, batch);
+    self
+      .g1_bn
+      .apply(&g1_out.clone(), &mut g1_out2, mask, batch, nn_x, nn_y);
+    pool_rows_gpool(
+      &g1_out2,
+      &mut g1_concat,
+      mask,
+      mask_sum,
+      batch,
+      nn_x,
+      nn_y,
+      g1c,
+    );
+    self
+      .gpool_to_bias_mul
+      .apply(&g1_concat, &mut g1_bias, batch);
     add_nc_bias_inplace(&mut p1_out, &g1_bias, batch, nn_x, nn_y, p1c);
-    self.p1_bn.apply(&p1_out.clone(), &mut p1_out2, mask, batch, nn_x, nn_y);
-    self.p2_conv.apply(&p1_out2, &mut policy_spatial, batch, false);
+    self
+      .p1_bn
+      .apply(&p1_out.clone(), &mut p1_out2, mask, batch, nn_x, nn_y);
+    self
+      .p2_conv
+      .apply(&p1_out2, &mut policy_spatial, batch, false);
 
     if model_version >= 15 {
       // v15+: pass = mul(g1_concat) + bias → act → mul2
       let mut p1_pass = vec![0.0f32; p1c * batch];
-      self.gpool_to_pass_mul.apply(&g1_concat, &mut p1_pass, batch);
+      self
+        .gpool_to_pass_mul
+        .apply(&g1_concat, &mut p1_pass, batch);
       if let Some(b) = &self.gpool_to_pass_bias {
         b.apply(&mut p1_pass, batch);
       }
@@ -1389,7 +1508,9 @@ impl PolicyHead {
         m.apply(&p1_pass, &mut policy_pass, batch);
       }
     } else {
-      self.gpool_to_pass_mul.apply(&g1_concat, &mut policy_pass, batch);
+      self
+        .gpool_to_pass_mul
+        .apply(&g1_concat, &mut policy_pass, batch);
     }
 
     (policy_pass, policy_spatial)
@@ -1467,8 +1588,18 @@ impl ValueHead {
     let mut ownership = vec![0.0f32; batch * hw * owc];
 
     self.v1_conv.apply(trunk, &mut v1_out, batch, false);
-    self.v1_bn.apply(&v1_out.clone(), &mut v1_out2, mask, batch, nn_x, nn_y);
-    pool_rows_value_head(&v1_out2, &mut v1_mean, mask_sum, batch, nn_x, nn_y, v1c);
+    self
+      .v1_bn
+      .apply(&v1_out.clone(), &mut v1_out2, mask, batch, nn_x, nn_y);
+    pool_rows_value_head(
+      &v1_out2,
+      &mut v1_mean,
+      mask_sum,
+      batch,
+      nn_x,
+      nn_y,
+      v1c,
+    );
     self.v2_mul.apply(&v1_mean, &mut v2_out, batch);
     self.v2_bias.apply(&mut v2_out, batch);
     self.v2_activation.apply_inplace(&mut v2_out);
@@ -1476,7 +1607,9 @@ impl ValueHead {
     self.v3_bias.apply(&mut value, batch);
     self.sv3_mul.apply(&v2_out, &mut score_value, batch);
     self.sv3_bias.apply(&mut score_value, batch);
-    self.v_ownership_conv.apply(&v1_out2, &mut ownership, batch, false);
+    self
+      .v_ownership_conv
+      .apply(&v1_out2, &mut ownership, batch, false);
 
     (value, score_value, ownership)
   }
@@ -1502,11 +1635,7 @@ pub struct Model {
 }
 
 impl Model {
-  pub fn new(
-    desc: &crate::model::ModelDesc,
-    nn_x: usize,
-    nn_y: usize,
-  ) -> Self {
+  pub fn new(desc: &crate::model::ModelDesc, nn_x: usize, nn_y: usize) -> Self {
     Model {
       name: desc.name.clone(),
       model_version: desc.model_version,
@@ -1576,14 +1705,9 @@ impl Model {
       self.model_version,
     );
 
-    let (value, score_value, ownership) = self.value_head.apply(
-      &trunk_out,
-      &mask,
-      &mask_sum,
-      batch,
-      nn_x,
-      nn_y,
-    );
+    let (value, score_value, ownership) = self
+      .value_head
+      .apply(&trunk_out, &mask, &mask_sum, batch, nn_x, nn_y);
 
     (policy_pass, policy_spatial, value, score_value, ownership)
   }
@@ -1597,8 +1721,8 @@ impl Model {
 mod tests {
   use super::*;
   use crate::model::{
-    Activation, ActivationLayerDesc, BatchNormLayerDesc, ConvLayerDesc,
-    MatBiasLayerDesc, MatMulLayerDesc,
+    Activation, BatchNormLayerDesc, ConvLayerDesc, MatBiasLayerDesc,
+    MatMulLayerDesc,
   };
 
   // -------------------------------------------------------------------------
@@ -1644,38 +1768,12 @@ mod tests {
     }
   }
 
-  fn make_bn_desc(nc: i32, scale: Vec<f32>, bias: Vec<f32>) -> BatchNormLayerDesc {
-    // merged_scale = scale / sqrt(var + eps) with var=0, eps=1e-5
-    // → scale / sqrt(1e-5)  but here we let caller pass pre-merged values
-    // directly via merged_scale/merged_bias for clarity.
-    let eps = 1e-5f32;
-    let merged_scale: Vec<f32> = scale
-      .iter()
-      .map(|&s| s / (0.0f32 + eps).sqrt())
-      .collect();
-    let merged_bias: Vec<f32> = bias
-      .iter()
-      .zip(merged_scale.iter())
-      .map(|(&b, &ms)| b - ms * 0.0f32)
-      .collect();
-    BatchNormLayerDesc {
-      name: "test_bn".into(),
-      num_channels: nc,
-      epsilon: eps,
-      has_scale: true,
-      has_bias: true,
-      mean: vec![0.0f32; nc as usize],
-      variance: vec![0.0f32; nc as usize],
-      scale: scale.clone(),
-      bias: bias.clone(),
-      merged_scale,
-      merged_bias,
-    }
-  }
-
   /// Build a thin `BatchNormLayerDesc` whose merged_scale and merged_bias are
   /// already exactly what we want (used by `BatchNormLayer::new` directly).
-  fn make_bn_desc_merged(merged_scale: Vec<f32>, merged_bias: Vec<f32>) -> BatchNormLayerDesc {
+  fn make_bn_desc_merged(
+    merged_scale: Vec<f32>,
+    merged_bias: Vec<f32>,
+  ) -> BatchNormLayerDesc {
     let nc = merged_scale.len() as i32;
     BatchNormLayerDesc {
       name: "test_bn".into(),
@@ -1692,7 +1790,11 @@ mod tests {
     }
   }
 
-  fn make_matmul_desc(ic: i32, oc: i32, weights_ic_oc: Vec<f32>) -> MatMulLayerDesc {
+  fn make_matmul_desc(
+    ic: i32,
+    oc: i32,
+    weights_ic_oc: Vec<f32>,
+  ) -> MatMulLayerDesc {
     MatMulLayerDesc {
       name: "test_mm".into(),
       in_channels: ic,
@@ -1702,7 +1804,11 @@ mod tests {
   }
 
   fn make_matbias_desc(nc: i32, weights: Vec<f32>) -> MatBiasLayerDesc {
-    MatBiasLayerDesc { name: "test_bias".into(), num_channels: nc, weights }
+    MatBiasLayerDesc {
+      name: "test_bias".into(),
+      num_channels: nc,
+      weights,
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1727,13 +1833,23 @@ mod tests {
 
   #[test]
   fn activation_identity() {
-    assert_close(apply_activation(-3.0, Activation::Identity), -3.0, 1e-6, "id");
+    assert_close(
+      apply_activation(-3.0, Activation::Identity),
+      -3.0,
+      1e-6,
+      "id",
+    );
     assert_close(apply_activation(5.0, Activation::Identity), 5.0, 1e-6, "id");
   }
 
   #[test]
   fn activation_relu() {
-    assert_close(apply_activation(-1.0, Activation::Relu), 0.0, 1e-6, "relu<0");
+    assert_close(
+      apply_activation(-1.0, Activation::Relu),
+      0.0,
+      1e-6,
+      "relu<0",
+    );
     assert_close(apply_activation(0.0, Activation::Relu), 0.0, 1e-6, "relu=0");
     assert_close(apply_activation(2.5, Activation::Relu), 2.5, 1e-6, "relu>0");
   }
@@ -1741,10 +1857,20 @@ mod tests {
   #[test]
   fn activation_mish() {
     // mish(0) = 0 * tanh(ln2) ≈ 0
-    assert_close(apply_activation(0.0, Activation::Mish), 0.0, 1e-5, "mish(0)");
+    assert_close(
+      apply_activation(0.0, Activation::Mish),
+      0.0,
+      1e-5,
+      "mish(0)",
+    );
     // mish(1) = tanh(ln(1+e)) ≈ 0.86509
     let expected = 1.0_f32 * (1.0_f32 + 1.0_f32.exp()).ln().tanh();
-    assert_close(apply_activation(1.0, Activation::Mish), expected, 1e-5, "mish(1)");
+    assert_close(
+      apply_activation(1.0, Activation::Mish),
+      expected,
+      1e-5,
+      "mish(1)",
+    );
     // mish(-5) should be close to 0 (negative saturation)
     let v = apply_activation(-5.0, Activation::Mish);
     assert!(v < 0.0 && v > -1.0, "mish(-5)={v} not in (-1,0)");
@@ -1767,7 +1893,12 @@ mod tests {
     let mut mat = vec![10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0];
     layer.apply(&mut mat, 2);
     // After: [c=0,n=0]=11, [c=0,n=1]=21, [c=1,n=0]=32, [c=1,n=1]=42, [c=2]=53,63
-    assert_slice_close(&mat, &[11.0, 21.0, 32.0, 42.0, 53.0, 63.0], 1e-6, "mat_bias");
+    assert_slice_close(
+      &mat,
+      &[11.0, 21.0, 32.0, 42.0, 53.0, 63.0],
+      1e-6,
+      "mat_bias",
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -1850,9 +1981,9 @@ mod tests {
     // tensor: pos 0 → (c0=1, c1=2), pos 1 → (c0=3, c1=4), …
     let mut tensor = vec![
       1.0f32, 2.0, // pos 0 (y=0,x=0): c0, c1
-      3.0, 4.0,   // pos 1 (y=0,x=1)
-      5.0, 6.0,   // pos 2 (y=1,x=0)
-      7.0, 8.0,   // pos 3 (y=1,x=1)
+      3.0, 4.0, // pos 1 (y=0,x=1)
+      5.0, 6.0, // pos 2 (y=1,x=0)
+      7.0, 8.0, // pos 3 (y=1,x=1)
     ];
     let bias = vec![10.0f32, 20.0]; // [c * batch] with batch=1: c0=10, c1=20
     add_nc_bias_inplace(&mut tensor, &bias, 1, 2, 2, 2);
@@ -1877,7 +2008,12 @@ mod tests {
     pool_rows_gpool(&input, &mut out, &mask, &mask_sum, 1, 1, 3, 1);
     let sqrtdiv = 3.0f32.sqrt();
     assert_close(out[0], 4.0, 1e-5, "gpool mean");
-    assert_close(out[1], 4.0 * (sqrtdiv - 14.0) * 0.1, 1e-5, "gpool sqrt-mean");
+    assert_close(
+      out[1],
+      4.0 * (sqrtdiv - 14.0) * 0.1,
+      1e-5,
+      "gpool sqrt-mean",
+    );
     assert_close(out[2], 6.0, 1e-5, "gpool max");
   }
 
@@ -1917,7 +2053,12 @@ mod tests {
     let sd14 = sqrtdiv - 14.0;
     assert_close(out[0], mean, 1e-5, "vhead mean");
     assert_close(out[1], mean * sd14 * 0.1, 1e-5, "vhead sqrt-term");
-    assert_close(out[2], mean * (sd14 * sd14 * 0.01 - 0.1), 1e-5, "vhead quad-term");
+    assert_close(
+      out[2],
+      mean * (sd14 * sd14 * 0.01 - 0.1),
+      1e-5,
+      "vhead quad-term",
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -1988,13 +2129,19 @@ mod tests {
             let mut acc = 0.0f32;
             for sy in 0..3usize {
               let iy = yi as isize + sy as isize - 1;
-              if iy < 0 || iy >= h as isize { continue; }
+              if iy < 0 || iy >= h as isize {
+                continue;
+              }
               for sx in 0..3usize {
                 let ix = xi as isize + sx as isize - 1;
-                if ix < 0 || ix >= w as isize { continue; }
+                if ix < 0 || ix >= w as isize {
+                  continue;
+                }
                 for ic_i in 0..ic {
-                  let k = kernel_oc_ic_y_x[oc_i * ic * 9 + ic_i * 9 + sy * 3 + sx];
-                  let inp = input[(n * h * w + iy as usize * w + ix as usize) * ic + ic_i];
+                  let k =
+                    kernel_oc_ic_y_x[oc_i * ic * 9 + ic_i * 9 + sy * 3 + sx];
+                  let inp = input
+                    [(n * h * w + iy as usize * w + ix as usize) * ic + ic_i];
                   acc += k * inp;
                 }
               }
@@ -2013,11 +2160,7 @@ mod tests {
     // Kernel: 3×3 edge-detector (Laplacian-ish): center=4, neighbours=-1, corners=0.
     // File order [y,x,ic=0,oc=0] (ic,oc vary in inner loop, but ic=oc=1 here):
     //   y,x iterates col-major within the filter.
-    let kernel_oc_ic_y_x = [
-      0.0f32, -1.0,  0.0,
-      -1.0,   4.0,  -1.0,
-       0.0,  -1.0,   0.0,
-    ]; // [oc=0, ic=0, y, x]
+    let kernel_oc_ic_y_x = [0.0f32, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 0.0]; // [oc=0, ic=0, y, x]
     // File order for parse (y outer, x inner, ic, oc all 1):
     let file_weights: Vec<f32> = kernel_oc_ic_y_x.to_vec();
     let desc = make_conv_desc(3, 3, 1, 1, file_weights.clone());
@@ -2043,14 +2186,14 @@ mod tests {
     let batch = 2usize;
 
     // kernel [oc, ic, y, x] — 2*2*9 = 36 values
-    let kernel_oc_ic_y_x: Vec<f32> = (0..36)
-      .map(|i| ((i as f32 * 0.1 - 1.8) * 0.5))
-      .collect();
+    let kernel_oc_ic_y_x: Vec<f32> =
+      (0..36).map(|i| (i as f32 * 0.1 - 1.8) * 0.5).collect();
 
     // ConvLayerDesc.weights uses [oc, ic, y, x] order (same as kernel_oc_ic_y_x).
     // The C++ desc.cpp re-orders file bytes from [y,x,ic,oc] to [oc,ic,y,x] before
     // storing in desc.weights, so we pass kernel_oc_ic_y_x directly here.
-    let desc = make_conv_desc(3, 3, ic as i32, oc as i32, kernel_oc_ic_y_x.clone());
+    let desc =
+      make_conv_desc(3, 3, ic as i32, oc as i32, kernel_oc_ic_y_x.clone());
     let layer = ConvLayer::new(&desc, w, h);
 
     let input: Vec<f32> = (0..(batch * h * w * ic))
@@ -2060,7 +2203,8 @@ mod tests {
     let mut winograd_out = vec![0.0f32; batch * h * w * oc];
     layer.apply(&input, &mut winograd_out, batch, false);
 
-    let ref_out = conv3x3_reference(&input, &kernel_oc_ic_y_x, batch, h, w, ic, oc);
+    let ref_out =
+      conv3x3_reference(&input, &kernel_oc_ic_y_x, batch, h, w, ic, oc);
     assert_slice_close(&winograd_out, &ref_out, 0.05, "3x3_winograd_multichan");
   }
 
@@ -2076,7 +2220,8 @@ mod tests {
 
     // Direct convolution of all-ones 3×3 input with all-ones 3×3 kernel:
     // corners→4, edges→6, center→9 (neighbour counts).
-    let ref_out = conv3x3_reference(&vec![1.0f32; 9], &kernel_oc_ic_y_x, 1, 3, 3, 1, 1);
+    let ref_out =
+      conv3x3_reference(&vec![1.0f32; 9], &kernel_oc_ic_y_x, 1, 3, 3, 1, 1);
     let expected: Vec<f32> = ref_out.iter().map(|&v| v + 5.0).collect();
     assert_slice_close(&out, &expected, 0.01, "3x3_winograd_accum");
   }

@@ -13,7 +13,7 @@
 /// `nextUInt()` = pcg32.next() + xorm.next()   (u32 + u32, wrapping)
 /// `nextUInt64()` = lower-32 | (upper-32 << 32)   (two consecutive u32 calls)
 use md5::{Digest as _, Md5};
-use sha2::{Digest as _, Sha256};
+use sha2::Sha256;
 use std::{env, fs, path::Path};
 
 // ---------------------------------------------------------------------------
@@ -138,26 +138,6 @@ impl Rand {
 }
 
 // ---------------------------------------------------------------------------
-// Bit-mixing helpers (used for ZOBRIST_BOARD_HASH2 only)
-// ---------------------------------------------------------------------------
-
-fn murmur_mix(mut x: u64) -> u64 {
-  x ^= x >> 33;
-  x = x.wrapping_mul(0xff51afd7ed558ccd);
-  x ^= x >> 33;
-  x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
-  x ^= x >> 33;
-  x
-}
-
-fn split_mix64(mut x: u64) -> u64 {
-  x = x.wrapping_add(0x9e3779b97f4a7c15);
-  x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-  x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
-  x ^ (x >> 31)
-}
-
-// ---------------------------------------------------------------------------
 // Main generation
 // ---------------------------------------------------------------------------
 
@@ -175,12 +155,6 @@ fn main() {
 
   let mut player_hash = [[0u64; 2]; 4];
   for h in &mut player_hash {
-    h[0] = rand.next_u64();
-    h[1] = rand.next_u64();
-  }
-
-  let mut encore_hash = [[0u64; 2]; 3];
-  for h in &mut encore_hash {
     h[0] = rand.next_u64();
     h[1] = rand.next_u64();
   }
@@ -204,21 +178,6 @@ fn main() {
   }
 
   // -----------------------------------------------------------------------
-  // Phase 2 — second encore start (reseed)
-  // -----------------------------------------------------------------------
-  rand.reinit("Board::initHash() for ZOBRIST_SECOND_ENCORE_START hashes");
-  let mut second_encore_hash = [[[0u64; 2]; 4]; MAX_ARR_SIZE];
-  for i in 0..MAX_ARR_SIZE {
-    for j in 0usize..4 {
-      if j == 0 || j == 3 {
-        second_encore_hash[i][j] = [0, 0];
-      } else {
-        second_encore_hash[i][j] = [rand.next_u64(), rand.next_u64()];
-      }
-    }
-  }
-
-  // -----------------------------------------------------------------------
   // Phase 3 — size hashes (reseed)
   // -----------------------------------------------------------------------
   rand.reinit("Board::initHash() for ZOBRIST_SIZE hashes");
@@ -227,19 +186,6 @@ fn main() {
   for i in 0..=MAX_LEN {
     size_x_hash[i] = [rand.next_u64(), rand.next_u64()];
     size_y_hash[i] = [rand.next_u64(), rand.next_u64()];
-  }
-
-  // -----------------------------------------------------------------------
-  // Phase 4 — board_hash2 (reseed + murmur/splitmix mixing)
-  // -----------------------------------------------------------------------
-  rand.reinit("Board::initHash() for second set of ZOBRIST hashes");
-  let mut board_hash2 = [[[0u64; 2]; 4]; MAX_ARR_SIZE];
-  for i in 0..MAX_ARR_SIZE {
-    for j in 0usize..4 {
-      let h0 = rand.next_u64();
-      let h1 = rand.next_u64();
-      board_hash2[i][j] = [murmur_mix(h0), split_mix64(h1)];
-    }
   }
 
   // -----------------------------------------------------------------------
@@ -287,18 +233,11 @@ fn main() {
   }
 
   emit_arr1(&mut src, "ZOBRIST_PLAYER_HASH", &player_hash);
-  emit_arr1(&mut src, "ZOBRIST_ENCORE_HASH", &encore_hash);
   emit_arr2(&mut src, "ZOBRIST_BOARD_HASH", &board_hash);
   emit_arr2(&mut src, "ZOBRIST_KO_MARK_HASH", &ko_mark_hash);
   emit_arr1(&mut src, "ZOBRIST_KO_LOC_HASH", &ko_loc_hash);
-  emit_arr2(
-    &mut src,
-    "ZOBRIST_SECOND_ENCORE_START_HASH",
-    &second_encore_hash,
-  );
   emit_arr1(&mut src, "ZOBRIST_SIZE_X_HASH", &size_x_hash);
   emit_arr1(&mut src, "ZOBRIST_SIZE_Y_HASH", &size_y_hash);
-  emit_arr2(&mut src, "ZOBRIST_BOARD_HASH2", &board_hash2);
 
   fs::write(&dest, src).unwrap();
 

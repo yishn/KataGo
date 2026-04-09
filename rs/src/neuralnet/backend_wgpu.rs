@@ -61,12 +61,6 @@ use crate::neuralnet::backend::{Backend, EvalOutput, RunFuture};
 // Helpers
 // ============================================================================
 
-/// Round `n` up to the nearest multiple of `align`.
-#[inline(always)]
-fn align_up(n: u64, align: u64) -> u64 {
-  (n + align - 1) & !(align - 1)
-}
-
 /// Create a GPU buffer pre-filled with `data`.
 fn upload_f32(
   device: &wgpu::Device,
@@ -90,11 +84,6 @@ fn alloc_f32(device: &wgpu::Device, label: &str, count: usize) -> wgpu::Buffer {
       | wgpu::BufferUsages::COPY_DST,
     mapped_at_creation: false,
   })
-}
-
-/// Write `data` into an existing buffer (offset 0).
-fn write_f32(queue: &wgpu::Queue, buf: &wgpu::Buffer, data: &[f32]) {
-  queue.write_buffer(buf, 0, bytemuck::cast_slice(data));
 }
 
 /// Readback `count` f32 values from a GPU buffer (async; works on native and WASM).
@@ -134,11 +123,6 @@ async fn readback_f32(
   drop(data);
   staging.unmap();
   v
-}
-
-/// Zero a GPU buffer via a fill pass.
-fn zero_buffer(encoder: &mut wgpu::CommandEncoder, buf: &wgpu::Buffer) {
-  encoder.clear_buffer(buf, 0, None);
 }
 
 // ============================================================================
@@ -904,8 +888,6 @@ pub struct WgpuBackend {
   policy_head: GpuPolicyHead,
   value_head: GpuValueHead,
   meta: ModelMeta,
-  nn_x: usize,
-  nn_y: usize,
 }
 
 #[derive(Clone)]
@@ -925,8 +907,6 @@ impl WgpuBackend {
   /// is available.
   pub async fn new(
     desc: &ModelDesc,
-    nn_x: usize,
-    nn_y: usize,
   ) -> Result<Self, String> {
     // Obtain a wgpu device.
     let (device, queue) = Self::acquire_device().await?;
@@ -959,8 +939,6 @@ impl WgpuBackend {
       policy_head,
       value_head,
       meta,
-      nn_x,
-      nn_y,
     })
   }
 
@@ -1020,7 +998,6 @@ impl WgpuBackend {
 
     let ctx = ForwardCtx {
       device: &self.device,
-      queue: &self.queue,
       pipes: &self.pipes,
       nn_x: nn_x as u32,
       nn_y: nn_y as u32,
@@ -1303,7 +1280,6 @@ fn build_value_head(
 /// we stay stateless and thread-safe.
 struct ForwardCtx<'a> {
   device: &'a wgpu::Device,
-  queue: &'a wgpu::Queue,
   pipes: &'a Pipelines,
   nn_x: u32,
   nn_y: u32,

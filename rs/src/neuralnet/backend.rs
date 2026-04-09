@@ -126,9 +126,7 @@ pub async fn build(
       crate::neuralnet::backend_cpu::CpuBackend::new(desc, nn_x, nn_y),
     ),
     BackendKind::Wgpu => {
-      match crate::neuralnet::backend_wgpu::WgpuBackend::new(desc, nn_x, nn_y)
-        .await
-      {
+      match crate::neuralnet::backend_wgpu::WgpuBackend::new(desc).await {
         Ok(b) => Box::new(b) as Box<dyn Backend>,
         Err(e) => {
           eprintln!(

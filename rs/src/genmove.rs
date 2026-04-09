@@ -177,8 +177,11 @@ mod tests {
   // -------------------------------------------------------------------------
 
   fn load_evaluator(nn_x: usize, nn_y: usize) -> Evaluator {
-    let desc = crate::model::ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
-      .expect(".network.bin.gz should be present and parseable");
+    let desc = crate::model::ModelDesc::load_from_gz_bytes(
+      include_bytes!("../../.network.bin.gz"),
+      true,
+    )
+    .expect(".network.bin.gz should be present and parseable");
     Evaluator::new(&desc, nn_x, nn_y)
   }
 
@@ -313,10 +316,13 @@ mod tests {
   /// (no fallback). Returns `None` when no GPU adapter is available so the
   /// calling test can skip cleanly with an early `return`.
   fn try_load_wgpu_evaluator(nn_x: usize, nn_y: usize) -> Option<Evaluator> {
-    let desc = crate::model::ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
-      .expect(".network.bin.gz should be present and parseable");
+    let desc = crate::model::ModelDesc::load_from_gz_bytes(
+      include_bytes!("../../.network.bin.gz"),
+      true,
+    )
+    .expect(".network.bin.gz should be present and parseable");
     match pollster::block_on(crate::neuralnet::backend_wgpu::WgpuBackend::new(
-      &desc, nn_x, nn_y,
+      &desc,
     )) {
       Ok(b) => Some(Evaluator::from_backend(Box::new(b), nn_x, nn_y)),
       Err(e) => {

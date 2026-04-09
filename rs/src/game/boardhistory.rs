@@ -262,14 +262,6 @@ impl BoardHistory {
     false
   }
 
-  fn number_of_ko_hash_occurrences(&self, hash: Hash128, table: &KoHashTable) -> usize {
-    if !table.sorted.is_empty() {
-      return table.occurrences_of_hash(hash);
-    }
-    let start = self.first_turn_idx_with_ko_history;
-    self.ko_hash_history[start..].iter().filter(|&&h| h == hash).count()
-  }
-
   // -----------------------------------------------------------------------
   // Move legality
   // -----------------------------------------------------------------------
