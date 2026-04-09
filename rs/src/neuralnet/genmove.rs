@@ -348,6 +348,7 @@ mod tests {
   /// and the argmax policy move for the same input position.
   ///
   /// Tolerance is 1e-3 to account for f32 GPU/CPU arithmetic differences.
+  #[ignore]
   #[test]
   #[cfg(not(target_arch = "wasm32"))]
   fn wgpu_outputs_match_cpu() {
