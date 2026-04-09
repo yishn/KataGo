@@ -1,9 +1,11 @@
-/// Main MCTS search engine.
-/// Mirrors `cpp/search/search.h/cpp` for single-threaded tree search.
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Dirichlet, Distribution};
+/// Main MCTS search engine.
+/// Mirrors `cpp/search/search.h/cpp` for single-threaded tree search.
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::game::board::{Board, Loc, PASS_LOC, Player};
 use crate::game::boardhistory::BoardHistory;
@@ -93,7 +95,7 @@ impl Search {
   }
 
   /// Run `n` playouts from the current root. Returns the number of playouts completed.
-  pub fn run_playouts(&mut self, n: usize, evaluator: &Evaluator) -> i64 {
+  pub async fn run_playouts(&mut self, n: usize, evaluator: &Evaluator) -> i64 {
     let sqrt_board_area =
       ((self.root_board.x_size * self.root_board.y_size) as f64).sqrt();
 
@@ -110,16 +112,18 @@ impl Search {
       // for single-threaded use this is safe.
       let root_ptr: *mut SearchNode = self.root_node.as_mut().unwrap().as_mut();
       let mut path: Vec<*mut SearchNode> = Vec::new();
-      self.playout_descend(
-        root_ptr,
-        board,
-        hist,
-        pla,
-        true,
-        &mut path,
-        evaluator,
-        sqrt_board_area,
-      );
+      self
+        .playout_descend(
+          root_ptr,
+          board,
+          hist,
+          pla,
+          true,
+          &mut path,
+          evaluator,
+          sqrt_board_area,
+        )
+        .await;
     }
 
     self.root_visits()
@@ -180,7 +184,7 @@ impl Search {
   // NN evaluation helper
   // -----------------------------------------------------------------------
 
-  fn evaluate_position(
+  async fn evaluate_position(
     &self,
     board: &Board,
     hist: &BoardHistory,
@@ -194,7 +198,7 @@ impl Search {
     fill_row_v7(board, hist, pla, self.nn_len, &mut spatial, &mut global);
 
     // The Evaluator expects NHWC spatial and global shaped for a batch of 1
-    let eval_out: EvalOutput = evaluator.run_blocking(&spatial, &global);
+    let eval_out: EvalOutput = evaluator.run(&spatial, &global).await;
 
     extract_nn_output(
       &eval_out,
@@ -324,145 +328,150 @@ impl Search {
   // playout_descend — recursive MCTS descent
   // -----------------------------------------------------------------------
 
-  fn playout_descend(
-    &mut self,
+  fn playout_descend<'a>(
+    &'a mut self,
     node_ptr: *mut SearchNode,
     mut board: Board,
     mut hist: BoardHistory,
     pla: Player,
     is_root: bool,
-    path: &mut Vec<*mut SearchNode>,
-    evaluator: &Evaluator,
+    path: &'a mut Vec<*mut SearchNode>,
+    evaluator: &'a Evaluator,
     sqrt_board_area: f64,
-  ) {
-    // Safety: node_ptr always points to a live SearchNode owned by the tree.
-    let node: &mut SearchNode = unsafe { &mut *node_ptr };
-
-    // ---- 1. Terminal check ----
-    if hist.is_game_finished && !node.force_non_terminal {
-      // Build a synthetic NNOutput from the final score.
-      let (win_prob, loss_prob, no_result) = if hist.is_no_result {
-        (0.0f32, 0.0f32, 1.0f32)
-      } else {
-        let score = hist.final_white_minus_black_score;
-        if score > 0.0 {
-          (1.0, 0.0, 0.0)
-        } else if score < 0.0 {
-          (0.0, 1.0, 0.0)
-        } else {
-          (0.5, 0.5, 0.0)
-        }
-      };
-      let score_mean = hist.final_white_minus_black_score;
-      let policy_size = (self.nn_len * self.nn_len + 1) as usize;
-      if node.nn_output.is_none() {
-        node.nn_output = Some(NNOutput {
-          white_win_prob: win_prob,
-          white_loss_prob: loss_prob,
-          white_no_result_prob: no_result,
-          white_score_mean: score_mean,
-          white_score_mean_sq: score_mean * score_mean,
-          white_lead: score_mean,
-          shortterm_winloss_error: 0.0,
-          shortterm_score_error: 0.0,
-          policy_probs: vec![-1.0; policy_size],
-          owner_map: None,
-          noised_policy: None,
-        });
-      }
-      let assume_fresh = node.stats.visits == 0;
-      add_leaf_value(
-        node,
-        &self.params,
-        self.recent_score_center,
-        sqrt_board_area,
-        assume_fresh,
-      );
-      self.backprop_path(path, sqrt_board_area);
-      return;
-    }
-
-    // ---- 2. Unevaluated node: run NN ----
-    if !node.is_evaluated() {
-      let nn_out = self.evaluate_position(&board, &hist, pla, evaluator);
-      node.nn_output = Some(nn_out);
-
-      let multi_stone_suicide_legal = hist.rules.multi_stone_suicide_legal;
-      Self::expand_children_from_policy(
-        node,
-        &board,
-        &hist,
-        pla,
-        self.nn_len,
-        multi_stone_suicide_legal,
-      );
-
-      if is_root {
-        self.apply_root_noise();
-      }
-
-      let assume_fresh = node.stats.visits == 0;
-      // Re-borrow node after apply_root_noise potentially mutated self.root_node
+  ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+      // Safety: node_ptr always points to a live SearchNode owned by the tree.
       let node: &mut SearchNode = unsafe { &mut *node_ptr };
-      add_leaf_value(
+
+      // ---- 1. Terminal check ----
+      if hist.is_game_finished && !node.force_non_terminal {
+        // Build a synthetic NNOutput from the final score.
+        let (win_prob, loss_prob, no_result) = if hist.is_no_result {
+          (0.0f32, 0.0f32, 1.0f32)
+        } else {
+          let score = hist.final_white_minus_black_score;
+          if score > 0.0 {
+            (1.0, 0.0, 0.0)
+          } else if score < 0.0 {
+            (0.0, 1.0, 0.0)
+          } else {
+            (0.5, 0.5, 0.0)
+          }
+        };
+        let score_mean = hist.final_white_minus_black_score;
+        let policy_size = (self.nn_len * self.nn_len + 1) as usize;
+        if node.nn_output.is_none() {
+          node.nn_output = Some(NNOutput {
+            white_win_prob: win_prob,
+            white_loss_prob: loss_prob,
+            white_no_result_prob: no_result,
+            white_score_mean: score_mean,
+            white_score_mean_sq: score_mean * score_mean,
+            white_lead: score_mean,
+            shortterm_winloss_error: 0.0,
+            shortterm_score_error: 0.0,
+            policy_probs: vec![-1.0; policy_size],
+            owner_map: None,
+            noised_policy: None,
+          });
+        }
+        let assume_fresh = node.stats.visits == 0;
+        add_leaf_value(
+          node,
+          &self.params,
+          self.recent_score_center,
+          sqrt_board_area,
+          assume_fresh,
+        );
+        self.backprop_path(path, sqrt_board_area);
+        return;
+      }
+
+      // ---- 2. Unevaluated node: run NN ----
+      if !node.is_evaluated() {
+        let nn_out =
+          self.evaluate_position(&board, &hist, pla, evaluator).await;
+        node.nn_output = Some(nn_out);
+
+        let multi_stone_suicide_legal = hist.rules.multi_stone_suicide_legal;
+        Self::expand_children_from_policy(
+          node,
+          &board,
+          &hist,
+          pla,
+          self.nn_len,
+          multi_stone_suicide_legal,
+        );
+
+        if is_root {
+          self.apply_root_noise();
+        }
+
+        let assume_fresh = node.stats.visits == 0;
+        // Re-borrow node after apply_root_noise potentially mutated self.root_node
+        let node: &mut SearchNode = unsafe { &mut *node_ptr };
+        add_leaf_value(
+          node,
+          &self.params,
+          self.recent_score_center,
+          sqrt_board_area,
+          assume_fresh,
+        );
+        self.backprop_path(path, sqrt_board_area);
+        return;
+      }
+
+      // ---- 3. Select best child ----
+      let (child_idx, move_loc) = searchpuct::select_best_child(
         node,
-        &self.params,
+        pla,
+        is_root,
         self.recent_score_center,
         sqrt_board_area,
-        assume_fresh,
+        &self.params,
       );
-      self.backprop_path(path, sqrt_board_area);
-      return;
-    }
 
-    // ---- 3. Select best child ----
-    let (child_idx, move_loc) = searchpuct::select_best_child(
-      node,
-      pla,
-      is_root,
-      self.recent_score_center,
-      sqrt_board_area,
-      &self.params,
-    );
+      if move_loc == crate::game::board::NULL_LOC {
+        // No legal moves — treat as pass
+        return;
+      }
 
-    if move_loc == crate::game::board::NULL_LOC {
-      // No legal moves — treat as pass
-      return;
-    }
+      // ---- 4. Make the move ----
+      let actual_move_loc = move_loc;
+      hist.make_board_move(&mut board, actual_move_loc, pla, None);
+      let next_pla = pla.opponent();
 
-    // ---- 4. Make the move ----
-    let actual_move_loc = move_loc;
-    hist.make_board_move(&mut board, actual_move_loc, pla, None);
-    let next_pla = pla.opponent();
+      // ---- 5. New or existing child ----
+      let child_ptr: *mut SearchNode = if child_idx < node.children.len() {
+        // Existing child: increment edge visits
+        node.children[child_idx].edge_visits += 1;
+        node.children[child_idx].child.as_mut() as *mut SearchNode
+      } else {
+        // New child: create and push
+        let child = Box::new(SearchNode::new(next_pla));
+        node.children.push(ChildEdge {
+          move_loc: actual_move_loc,
+          edge_visits: 1,
+          child,
+        });
+        node.children.last_mut().unwrap().child.as_mut() as *mut SearchNode
+      };
 
-    // ---- 5. New or existing child ----
-    let child_ptr: *mut SearchNode = if child_idx < node.children.len() {
-      // Existing child: increment edge visits
-      node.children[child_idx].edge_visits += 1;
-      node.children[child_idx].child.as_mut() as *mut SearchNode
-    } else {
-      // New child: create and push
-      let child = Box::new(SearchNode::new(next_pla));
-      node.children.push(ChildEdge {
-        move_loc: actual_move_loc,
-        edge_visits: 1,
-        child,
-      });
-      node.children.last_mut().unwrap().child.as_mut() as *mut SearchNode
-    };
-
-    // ---- 6. Recurse ----
-    path.push(node_ptr);
-    self.playout_descend(
-      child_ptr,
-      board,
-      hist,
-      next_pla,
-      false,
-      path,
-      evaluator,
-      sqrt_board_area,
-    );
+      // ---- 6. Recurse ----
+      path.push(node_ptr);
+      self
+        .playout_descend(
+          child_ptr,
+          board,
+          hist,
+          next_pla,
+          false,
+          path,
+          evaluator,
+          sqrt_board_area,
+        )
+        .await;
+    }) // end Box::pin
   }
 
   // -----------------------------------------------------------------------

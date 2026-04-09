@@ -97,25 +97,4 @@ impl Evaluator {
     debug_assert_eq!(global.len(), self.num_input_global_channels);
     self.backend.run(spatial, global, meta, self.nn_x, self.nn_y).await
   }
-
-  /// Blocking (sync) inference, for use in non-async contexts on native targets.
-  ///
-  /// Wraps [`run`] in [`pollster::block_on`].  Not available on `wasm32`.
-  #[cfg(not(target_arch = "wasm32"))]
-  pub fn run_blocking(&self, spatial: &[f32], global: &[f32]) -> EvalOutput {
-    pollster::block_on(self.run(spatial, global))
-  }
-
-  /// Blocking (sync) inference with optional SGF metadata, for native use.
-  ///
-  /// Not available on `wasm32`.
-  #[cfg(not(target_arch = "wasm32"))]
-  pub fn run_with_meta_blocking(
-    &self,
-    spatial: &[f32],
-    global: &[f32],
-    meta: Option<&[f32]>,
-  ) -> EvalOutput {
-    pollster::block_on(self.run_with_meta(spatial, global, meta))
-  }
 }
