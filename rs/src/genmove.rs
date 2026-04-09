@@ -91,13 +91,14 @@ pub async fn position_eval(
   )
 }
 
-/// Generate a move for `next_player` using the policy head of `evaluator`.
+/// Generate a move for `next_player` by sampling from the policy distribution
+/// over legal moves.
 ///
 /// The function:
 /// 1. Encodes `board` + `hist` into NN input features.
 /// 2. Runs a single forward pass through the network.
-/// 3. Among all legal, non-pass board positions returns the one with the
-///    highest policy logit (channel 0 of `policy_spatial`).
+/// 3. Applies softmax over legal, non-pass positions to form a probability
+///    distribution and samples one move from it.
 /// 4. Returns [`PASS_LOC`] if no legal non-pass move exists.
 pub async fn genmove(
   evaluator: &Evaluator,
@@ -105,27 +106,43 @@ pub async fn genmove(
   hist: &BoardHistory,
   next_player: Player,
 ) -> Loc {
+  use rand::Rng;
+
   let nn_x = evaluator.nn_x;
   let logits = policy_values(evaluator, board, hist, next_player).await;
 
-  let mut best_loc = PASS_LOC;
-  let mut best_logit = f32::NEG_INFINITY;
-
+  // Collect (loc, logit) for every legal non-pass position.
+  let mut candidates: Vec<(Loc, f32)> = Vec::new();
   for y in 0..board.y_size {
     for x in 0..board.x_size {
       let loc = location::get_loc(x, y, board.x_size);
-      if !hist.is_legal(board, loc, next_player) {
-        continue;
-      }
-      let logit = logits[y * nn_x + x];
-      if logit > best_logit {
-        best_logit = logit;
-        best_loc = loc;
+      if hist.is_legal(board, loc, next_player) {
+        candidates.push((loc, logits[y * nn_x + x]));
       }
     }
   }
 
-  best_loc
+  if candidates.is_empty() {
+    return PASS_LOC;
+  }
+
+  // Softmax over legal moves for numerical stability.
+  let max_logit = candidates.iter().map(|&(_, l)| l).fold(f32::NEG_INFINITY, f32::max);
+  let exps: Vec<f32> = candidates.iter().map(|&(_, l)| (l - max_logit).exp()).collect();
+  let sum: f32 = exps.iter().sum();
+
+  // Sample via a single uniform draw against the cumulative distribution.
+  let threshold = rand::thread_rng().gen_range(0.0f32..sum);
+  let mut cumulative = 0.0f32;
+  for (i, &exp) in exps.iter().enumerate() {
+    cumulative += exp;
+    if cumulative >= threshold {
+      return candidates[i].0;
+    }
+  }
+
+  // Fallback: floating-point rounding left us just short — return last candidate.
+  candidates.last().unwrap().0
 }
 
 // ---------------------------------------------------------------------------
@@ -416,19 +433,24 @@ mod tests {
     });
   }
 
-  /// Two consecutive wgpu forward passes with identical inputs must agree.
+  /// genmove samples from the distribution, so repeated calls may differ —
+  /// but each result must be a legal move.
   #[test]
   #[cfg(not(target_arch = "wasm32"))]
-  fn wgpu_genmove_is_deterministic() {
+  fn wgpu_genmove_is_legal_on_repeated_calls() {
     let Some(ev) = try_load_wgpu_evaluator(19, 19) else {
       return;
     };
     pollster::block_on(async {
       let board = Board::new(19, 19);
       let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-      let mv1 = genmove(&ev, &board, &hist, Player::Black).await;
-      let mv2 = genmove(&ev, &board, &hist, Player::Black).await;
-      assert_eq!(mv1, mv2, "wgpu genmove must be deterministic");
+      for _ in 0..5 {
+        let mv = genmove(&ev, &board, &hist, Player::Black).await;
+        assert!(
+          hist.is_legal(&board, mv, Player::Black),
+          "sampled move {mv} is illegal"
+        );
+      }
     });
   }
 
@@ -684,10 +706,11 @@ mod tests {
     });
   }
 
-  /// The argmax of policy_values over legal moves equals what genmove picks.
+  /// genmove must only sample moves that have positive policy weight,
+  /// i.e. the returned position must be in the legal-move candidate set.
   #[test]
   #[cfg(not(target_arch = "wasm32"))]
-  fn wgpu_policy_values_argmax_matches_genmove() {
+  fn wgpu_genmove_samples_from_policy_support() {
     let Some(ev) = try_load_wgpu_evaluator(19, 19) else {
       return;
     };
@@ -697,7 +720,8 @@ mod tests {
       let nn_x = ev.nn_x;
 
       let vals = policy_values(&ev, &board, &hist, Player::Black).await;
-      let best_pos = vals
+      // Set of positions with strictly positive softmax weight among legal moves.
+      let legal_positions: std::collections::HashSet<usize> = vals
         .iter()
         .enumerate()
         .filter(|&(i, _)| {
@@ -706,19 +730,15 @@ mod tests {
           let loc = location::get_loc(x, y, board.x_size);
           hist.is_legal(&board, loc, Player::Black)
         })
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
         .map(|(i, _)| i)
-        .expect("at least one legal move");
-
-      let expected_x = best_pos % nn_x;
-      let expected_y = best_pos / nn_x;
-      let expected_loc =
-        location::get_loc(expected_x, expected_y, board.x_size);
+        .collect();
 
       let mv = genmove(&ev, &board, &hist, Player::Black).await;
-      assert_eq!(
-        mv, expected_loc,
-        "genmove disagrees with policy_values argmax"
+      let x = location::get_x(mv, board.x_size);
+      let y = location::get_y(mv, board.x_size);
+      assert!(
+        legal_positions.contains(&(y * nn_x + x)),
+        "genmove returned move outside policy support"
       );
     });
   }
