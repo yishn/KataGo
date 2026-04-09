@@ -13,7 +13,7 @@
 /// features are faithfully encoded, which is sufficient for inference with a
 /// real model or for unit testing with synthetic weights.
 use crate::game::{
-  board::{Board, Loc, Player, NULL_LOC, PASS_LOC, location},
+  board::{Board, Loc, NULL_LOC, PASS_LOC, Player, location},
   boardhistory::BoardHistory,
   rules::{KoRule, ScoringRule, TaxRule},
 };
@@ -155,14 +155,19 @@ pub fn fill_row(
   // V5 puts previous moves at features 6-10; all others at 9-13.
 
   let prev_feat = if nc == NUM_SPATIAL_V5 { 6usize } else { 9usize };
-  let hide_history = hist.is_game_finished;
 
-  if !hide_history {
-    encode_prev_moves(
-      board, hist, pla, opp, nn_x, nn_y, nc, prev_feat,
-      out_spatial, out_global,
-    );
-  }
+  encode_prev_moves(
+    board,
+    hist,
+    pla,
+    opp,
+    nn_x,
+    nn_y,
+    nc,
+    prev_feat,
+    out_spatial,
+    out_global,
+  );
 
   // Features 14-17: ladder features → left as 0 (complex read-out omitted)
   // Features 18-19: territory features → left as 0 (heavy computation omitted)
@@ -173,18 +178,18 @@ pub fn fill_row(
 
   let board_area = (board.x_size * board.y_size) as f32;
   let self_komi = {
-    let raw = hist.rules.komi
-      + hist.white_handicap_bonus_score
-      + hist.white_bonus_score;
+    let raw = hist.rules.komi;
     if pla == Player::White { raw } else { -raw }
   };
-  let self_komi = self_komi
-    .max(-(board_area + 1.0))
-    .min(board_area + 1.0);
+  let self_komi = self_komi.max(-(board_area + 1.0)).min(board_area + 1.0);
 
   // Global[5]: komi (scale by /15 for V3/V4, /20 for V5/V6/V7)
   if num_global > 5 {
-    let div = if num_global == NUM_GLOBAL_V3_V4 { 15.0f32 } else { 20.0f32 };
+    let div = if num_global == NUM_GLOBAL_V3_V4 {
+      15.0f32
+    } else {
+      20.0f32
+    };
     out_global[5] = self_komi / div;
   }
 
@@ -217,16 +222,31 @@ pub fn fill_row(
   match num_global {
     14 => {
       // V3 / V4: encore=10,11; pass-end=12; komi-parity=13
-      if hist.encore_phase > 0 { out_global[10] = 1.0; }
-      if hist.encore_phase > 1 { out_global[11] = 1.0; }
-      let pass_end = !hide_history && hist.pass_would_end_game(board, pla);
+      if hist.encore_phase > 0 {
+        out_global[10] = 1.0;
+      }
+      if hist.encore_phase > 1 {
+        out_global[11] = 1.0;
+      }
+      let pass_end = hist.pass_would_end_game(board, pla);
       out_global[12] = if pass_end { 1.0 } else { 0.0 };
-      set_komi_parity(self_komi, &hist.rules, hist.encore_phase, board, 13, out_global);
+      set_komi_parity(
+        self_komi,
+        &hist.rules,
+        hist.encore_phase,
+        board,
+        13,
+        out_global,
+      );
     }
     12 => {
       // V5: encore=10,11 only
-      if hist.encore_phase > 0 { out_global[10] = 1.0; }
-      if hist.encore_phase > 1 { out_global[11] = 1.0; }
+      if hist.encore_phase > 0 {
+        out_global[10] = 1.0;
+      }
+      if hist.encore_phase > 1 {
+        out_global[11] = 1.0;
+      }
     }
     16 | 19 => {
       // V6 (16) and V7 (19, extras at 16-18 left as zero)
@@ -236,14 +256,30 @@ pub fn fill_row(
       //   15: komi parity
       match hist.rules.tax_rule {
         TaxRule::None => {}
-        TaxRule::Seki => { out_global[10] = 1.0; }
-        TaxRule::All => { out_global[10] = 1.0; out_global[11] = 1.0; }
+        TaxRule::Seki => {
+          out_global[10] = 1.0;
+        }
+        TaxRule::All => {
+          out_global[10] = 1.0;
+          out_global[11] = 1.0;
+        }
       }
-      if hist.encore_phase > 0 { out_global[12] = 1.0; }
-      if hist.encore_phase > 1 { out_global[13] = 1.0; }
-      let pass_end = !hide_history && hist.pass_would_end_game(board, pla);
+      if hist.encore_phase > 0 {
+        out_global[12] = 1.0;
+      }
+      if hist.encore_phase > 1 {
+        out_global[13] = 1.0;
+      }
+      let pass_end = hist.pass_would_end_game(board, pla);
       out_global[14] = if pass_end { 1.0 } else { 0.0 };
-      set_komi_parity(self_komi, &hist.rules, hist.encore_phase, board, 15, out_global);
+      set_komi_parity(
+        self_komi,
+        &hist.rules,
+        hist.encore_phase,
+        board,
+        15,
+        out_global,
+      );
       // V7 extras [16,17,18] remain 0
     }
     _ => {
@@ -251,17 +287,33 @@ pub fn fill_row(
       if num_global >= 16 {
         match hist.rules.tax_rule {
           TaxRule::None => {}
-          TaxRule::Seki => { if num_global > 10 { out_global[10] = 1.0; } }
+          TaxRule::Seki => {
+            if num_global > 10 {
+              out_global[10] = 1.0;
+            }
+          }
           TaxRule::All => {
-            if num_global > 10 { out_global[10] = 1.0; }
-            if num_global > 11 { out_global[11] = 1.0; }
+            if num_global > 10 {
+              out_global[10] = 1.0;
+            }
+            if num_global > 11 {
+              out_global[11] = 1.0;
+            }
           }
         }
-        if num_global > 12 && hist.encore_phase > 0 { out_global[12] = 1.0; }
-        if num_global > 13 && hist.encore_phase > 1 { out_global[13] = 1.0; }
+        if num_global > 12 && hist.encore_phase > 0 {
+          out_global[12] = 1.0;
+        }
+        if num_global > 13 && hist.encore_phase > 1 {
+          out_global[13] = 1.0;
+        }
       } else if num_global >= 12 {
-        if num_global > 10 && hist.encore_phase > 0 { out_global[10] = 1.0; }
-        if num_global > 11 && hist.encore_phase > 1 { out_global[11] = 1.0; }
+        if num_global > 10 && hist.encore_phase > 0 {
+          out_global[10] = 1.0;
+        }
+        if num_global > 11 && hist.encore_phase > 1 {
+          out_global[11] = 1.0;
+        }
       }
     }
   }
@@ -309,19 +361,25 @@ fn encode_prev_moves(
   let n = moves.len();
 
   let pairs: &[(usize, Player, usize)] = &[
-    (1, opp, 0),  // prev1: opp, global flag 0
-    (2, pla, 1),  // prev2: pla, global flag 1
-    (3, opp, 2),  // prev3: opp, global flag 2
-    (4, pla, 3),  // prev4: pla, global flag 3
-    (5, opp, 4),  // prev5: opp, global flag 4
+    (1, opp, 0), // prev1: opp, global flag 0
+    (2, pla, 1), // prev2: pla, global flag 1
+    (3, opp, 2), // prev3: opp, global flag 2
+    (4, pla, 3), // prev4: pla, global flag 3
+    (5, opp, 4), // prev5: opp, global flag 4
   ];
 
   for &(dist, expected_pla, gidx) in pairs {
-    if n < dist { break; }
+    if n < dist {
+      break;
+    }
     let m = &moves[n - dist];
-    if m.player != expected_pla { break; }
+    if m.player != expected_pla {
+      break;
+    }
     let feat_idx = prev_feat + (dist - 1);
-    if feat_idx >= nc { break; }
+    if feat_idx >= nc {
+      break;
+    }
     if m.loc == PASS_LOC {
       if gidx < global.len() {
         global[gidx] = 1.0;

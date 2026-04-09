@@ -12,7 +12,7 @@
 /// let ev = Evaluator::with_backend(&desc, 19, 19, BackendKind::Wgpu).await;
 /// ```
 
-use crate::model::ModelDesc;
+use crate::neuralnet::model::ModelDesc;
 use crate::neuralnet::backend::{self, BackendKind};
 use crate::neuralnet::backend_cpu::CpuBackend;
 

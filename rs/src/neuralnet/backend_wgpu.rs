@@ -51,11 +51,11 @@ use futures_channel::oneshot;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
-use crate::model::{
+use crate::neuralnet::backend::{Backend, EvalOutput, RunFuture};
+use crate::neuralnet::model::{
   Activation, BatchNormLayerDesc, BlockDesc, ConvLayerDesc, MatBiasLayerDesc,
   MatMulLayerDesc, ModelDesc,
 };
-use crate::neuralnet::backend::{Backend, EvalOutput, RunFuture};
 
 // ============================================================================
 // Helpers
@@ -905,9 +905,7 @@ struct ModelMeta {
 impl WgpuBackend {
   /// Try to create a [`WgpuBackend`].  Returns `Err` if no suitable GPU adapter
   /// is available.
-  pub async fn new(
-    desc: &ModelDesc,
-  ) -> Result<Self, String> {
+  pub async fn new(desc: &ModelDesc) -> Result<Self, String> {
     // Obtain a wgpu device.
     let (device, queue) = Self::acquire_device().await?;
     let device = Arc::new(device);
@@ -1114,9 +1112,9 @@ fn act_code(act: Activation) -> u32 {
 
 fn build_nac(
   device: &wgpu::Device,
-  bn: &crate::model::BatchNormLayerDesc,
+  bn: &crate::neuralnet::model::BatchNormLayerDesc,
   act: Activation,
-  conv: &crate::model::ConvLayerDesc,
+  conv: &crate::neuralnet::model::ConvLayerDesc,
 ) -> GpuNormActConv {
   GpuNormActConv {
     bn: GpuBn::new(device, bn, act),
@@ -1126,7 +1124,7 @@ fn build_nac(
 
 fn build_blocks(
   device: &wgpu::Device,
-  desc_blocks: &[crate::model::BlockDesc],
+  desc_blocks: &[crate::neuralnet::model::BlockDesc],
 ) -> Vec<GpuBlock> {
   desc_blocks
     .iter()
@@ -1187,7 +1185,7 @@ fn build_blocks(
 
 fn build_trunk(
   device: &wgpu::Device,
-  desc: &crate::model::TrunkDesc,
+  desc: &crate::neuralnet::model::TrunkDesc,
 ) -> GpuTrunk {
   let sgf_meta_encoder =
     desc.sgf_metadata_encoder.as_ref().map(|e| GpuSgfEncoder {
@@ -1215,7 +1213,7 @@ fn build_trunk(
 
 fn build_policy_head(
   device: &wgpu::Device,
-  desc: &crate::model::PolicyHeadDesc,
+  desc: &crate::neuralnet::model::PolicyHeadDesc,
   model_version: i32,
 ) -> GpuPolicyHead {
   let p1c = desc.p1_conv.out_channels as u32;
@@ -1251,7 +1249,7 @@ fn build_policy_head(
 
 fn build_value_head(
   device: &wgpu::Device,
-  desc: &crate::model::ValueHeadDesc,
+  desc: &crate::neuralnet::model::ValueHeadDesc,
 ) -> GpuValueHead {
   GpuValueHead {
     v1c: desc.v1_conv.out_channels as u32,

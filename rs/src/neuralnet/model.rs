@@ -1292,7 +1292,6 @@ impl ModelDesc {
       .map_err(|e| format!("gzip decompression failed: {e}"))?;
     Self::load_from_bytes(&decompressed, binary_floats)
   }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1491,8 +1490,11 @@ mod tests {
 
     #[test]
     fn load_network_bin_gz_succeeds() {
-      let m = ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
-        .expect("loading .network.bin.gz should succeed");
+      let m = ModelDesc::load_from_gz_bytes(
+        include_bytes!("../../../.network.bin.gz"),
+        true,
+      )
+      .expect("loading .network.bin.gz should succeed");
 
       assert!(
         m.model_version >= 3 && m.model_version <= 16,
@@ -1511,9 +1513,11 @@ mod tests {
 
     #[test]
     fn network_trunk_channel_counts_are_consistent() {
-      let m =
-        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
-          .unwrap();
+      let m = ModelDesc::load_from_gz_bytes(
+        include_bytes!("../../../.network.bin.gz"),
+        true,
+      )
+      .unwrap();
 
       assert_eq!(
         m.trunk.initial_conv.out_channels,
@@ -1540,9 +1544,11 @@ mod tests {
 
     #[test]
     fn network_policy_head_shapes_are_valid() {
-      let m =
-        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
-          .unwrap();
+      let m = ModelDesc::load_from_gz_bytes(
+        include_bytes!("../../../.network.bin.gz"),
+        true,
+      )
+      .unwrap();
       let ph = &m.policy_head;
 
       assert_eq!(ph.p2_conv.out_channels, ph.policy_out_channels);
@@ -1553,9 +1559,11 @@ mod tests {
 
     #[test]
     fn network_value_head_shapes_are_valid() {
-      let m =
-        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
-          .unwrap();
+      let m = ModelDesc::load_from_gz_bytes(
+        include_bytes!("../../../.network.bin.gz"),
+        true,
+      )
+      .unwrap();
       let vh = &m.value_head;
 
       assert_eq!(vh.v1_conv.out_channels, vh.v1_bn.num_channels);
@@ -1568,9 +1576,11 @@ mod tests {
 
     #[test]
     fn network_conv_weights_have_correct_size() {
-      let m =
-        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
-          .unwrap();
+      let m = ModelDesc::load_from_gz_bytes(
+        include_bytes!("../../../.network.bin.gz"),
+        true,
+      )
+      .unwrap();
       let ic = &m.trunk.initial_conv;
       let expected =
         (ic.conv_y_size * ic.conv_x_size * ic.in_channels * ic.out_channels)
@@ -1584,9 +1594,11 @@ mod tests {
 
     #[test]
     fn network_bn_merged_params_are_finite() {
-      let m =
-        ModelDesc::load_from_gz_bytes(include_bytes!("../../.network.bin.gz"), true)
-          .unwrap();
+      let m = ModelDesc::load_from_gz_bytes(
+        include_bytes!("../../../.network.bin.gz"),
+        true,
+      )
+      .unwrap();
       let bn = &m.trunk.trunk_tip_bn;
       for (i, (&s, &b)) in bn
         .merged_scale
@@ -1603,16 +1615,26 @@ mod tests {
 
     #[test]
     fn load_g170_bin_gz_succeeds() {
-      let m = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170-b6c96-s175395328-d26788732.bin.gz"), true)
-        .expect("loading g170 bin.gz should succeed");
+      let m = ModelDesc::load_from_gz_bytes(
+        include_bytes!(
+          "../../../cpp/tests/models/g170-b6c96-s175395328-d26788732.bin.gz"
+        ),
+        true,
+      )
+      .expect("loading g170 bin.gz should succeed");
       assert!(m.model_version >= 3);
       assert!(!m.trunk.blocks.is_empty());
     }
 
     #[test]
     fn load_g170_txt_gz_succeeds() {
-      let m = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170-b6c96-s175395328-d26788732.txt.gz"), false)
-        .expect("loading g170 txt.gz should succeed");
+      let m = ModelDesc::load_from_gz_bytes(
+        include_bytes!(
+          "../../../cpp/tests/models/g170-b6c96-s175395328-d26788732.txt.gz"
+        ),
+        false,
+      )
+      .expect("loading g170 txt.gz should succeed");
       assert!(m.model_version >= 3);
       assert!(!m.trunk.blocks.is_empty());
     }
@@ -1621,8 +1643,20 @@ mod tests {
     /// metadata and first few weight values.
     #[test]
     fn g170_bin_and_txt_are_consistent() {
-      let mb = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170-b6c96-s175395328-d26788732.bin.gz"), true).unwrap();
-      let mt = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170-b6c96-s175395328-d26788732.txt.gz"), false).unwrap();
+      let mb = ModelDesc::load_from_gz_bytes(
+        include_bytes!(
+          "../../../cpp/tests/models/g170-b6c96-s175395328-d26788732.bin.gz"
+        ),
+        true,
+      )
+      .unwrap();
+      let mt = ModelDesc::load_from_gz_bytes(
+        include_bytes!(
+          "../../../cpp/tests/models/g170-b6c96-s175395328-d26788732.txt.gz"
+        ),
+        false,
+      )
+      .unwrap();
 
       // The two files have slightly different embedded names; compare structure.
       assert_eq!(mb.model_version, mt.model_version);
@@ -1648,7 +1682,7 @@ mod tests {
 
     #[test]
     fn load_g170e_bin_gz_succeeds() {
-      let m = ModelDesc::load_from_gz_bytes(include_bytes!("../../cpp/tests/models/g170e-b10c128-s1141046784-d204142634.bin.gz"), true)
+      let m = ModelDesc::load_from_gz_bytes(include_bytes!("../../../cpp/tests/models/g170e-b10c128-s1141046784-d204142634.bin.gz"), true)
         .expect("loading g170e bin.gz should succeed");
       assert!(m.model_version >= 3);
       assert_eq!(m.trunk.trunk_num_channels, 128);

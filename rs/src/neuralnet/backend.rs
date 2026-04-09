@@ -9,13 +9,13 @@
 ///
 /// 1. Create a struct that holds all compiled/uploaded weight data.
 /// 2. Implement [`Backend`].
-/// 3. Build it from a [`crate::model::ModelDesc`] using whichever initialiser
+/// 3. Build it from a [`crate::neuralnet::model::ModelDesc`] using whichever initialiser
 ///    your struct exposes.
 /// 4. Pass it to [`super::eval::Evaluator::from_backend`].
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::model::ModelDesc;
+use crate::neuralnet::model::ModelDesc;
 
 // ---------------------------------------------------------------------------
 // EvalOutput

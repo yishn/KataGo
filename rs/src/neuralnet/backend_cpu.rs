@@ -4,7 +4,7 @@
 /// happens on the CPU using the same pure-Rust NHWC layer stack that was
 /// previously embedded directly in [`super::eval::Evaluator`].
 
-use crate::model::ModelDesc;
+use crate::neuralnet::model::ModelDesc;
 use crate::neuralnet::backend::{Backend, EvalOutput, RunFuture};
 use crate::neuralnet::layers::Model;
 

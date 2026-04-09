@@ -161,12 +161,6 @@ fn zobrist() -> &'static ZobristTables {
   })
 }
 
-/// Fixed Zobrist constants from board.cpp (hardcoded, not seeded).
-pub const ZOBRIST_PASS_ENDS_PHASE: Hash128 =
-  Hash128::new(0x853E097C279EBF4E, 0xE3153DEF9E14A62C);
-pub const ZOBRIST_GAME_IS_OVER: Hash128 =
-  Hash128::new(0xb6f9e465597a77ee, 0xf1d583d960a4ce7f);
-
 // ---------------------------------------------------------------------------
 // Location utilities
 // ---------------------------------------------------------------------------

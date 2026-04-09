@@ -13,5 +13,6 @@ pub mod backend_cpu;
 pub mod backend_wgpu;
 pub mod eval;
 pub mod layers;
+pub mod model;
 pub mod nninputs;
 pub mod nnoutput;

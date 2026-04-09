@@ -44,9 +44,6 @@ pub enum WhbRule {
 // Rules struct
 // ---------------------------------------------------------------------------
 
-pub const MIN_USER_KOMI: f32 = -150.0;
-pub const MAX_USER_KOMI: f32 = 150.0;
-
 /// The complete ruleset used for one game.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rules {
@@ -201,7 +198,10 @@ mod tests {
     let hashes: Vec<_> = ZOBRIST_KO_RULE_HASH.iter().collect();
     for i in 0..4 {
       for j in (i + 1)..4 {
-        assert_ne!(hashes[i], hashes[j], "KO_RULE_HASH[{i}] == KO_RULE_HASH[{j}]");
+        assert_ne!(
+          hashes[i], hashes[j],
+          "KO_RULE_HASH[{i}] == KO_RULE_HASH[{j}]"
+        );
       }
     }
   }

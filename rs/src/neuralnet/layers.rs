@@ -7,7 +7,7 @@
 ///
 /// This mirrors the C++ Eigen layout which is column-major [C,X,Y,N] — the
 /// element ordering is identical; only the conceptual axis labels differ.
-use crate::model::{
+use crate::neuralnet::model::{
   Activation, BatchNormLayerDesc, BlockDesc, ConvLayerDesc,
   GlobalPoolingResidualBlockDesc, MatBiasLayerDesc, MatMulLayerDesc,
   NestedBottleneckResidualBlockDesc, ResidualBlockDesc, SgfMetadataEncoderDesc,
@@ -105,7 +105,6 @@ fn transform5x5_6(a: &mut [f32; 6]) {
 /// `oc, ic, y, x`).  For 3×3 and 5×5 filters a Winograd transform is used.
 /// For other sizes (e.g. 1×1) a direct im2col-style loop is used.
 pub struct ConvLayer {
-  pub name: String,
   pub conv_y: usize,
   pub conv_x: usize,
   pub in_c: usize,
@@ -203,7 +202,6 @@ impl ConvLayer {
       }
 
       ConvLayer {
-        name: desc.name.clone(),
         conv_y: cy,
         conv_x: cx,
         in_c: ic,
@@ -219,7 +217,6 @@ impl ConvLayer {
     } else {
       // Direct convolution — store kernel as-is (oc, ic, y, x)
       ConvLayer {
-        name: desc.name.clone(),
         conv_y: cy,
         conv_x: cx,
         in_c: ic,
@@ -609,7 +606,6 @@ impl ConvLayer {
 /// Batch-normalisation layer with pre-fused scale/bias.
 /// Optionally applies an activation in the same pass.
 pub struct BatchNormLayer {
-  pub name: String,
   pub activation: Activation,
   pub merged_scale: Vec<f32>,
   pub merged_bias: Vec<f32>,
@@ -618,7 +614,6 @@ pub struct BatchNormLayer {
 impl BatchNormLayer {
   pub fn new(desc: &BatchNormLayerDesc, act: Activation) -> Self {
     BatchNormLayer {
-      name: desc.name.clone(),
       activation: act,
       merged_scale: desc.merged_scale.clone(),
       merged_bias: desc.merged_bias.clone(),
@@ -671,7 +666,6 @@ impl BatchNormLayer {
 /// Weights layout in desc: [ic * oc] (file order ic,oc).
 /// We store transposed to [oc * ic] for efficient row-access.
 pub struct MatMulLayer {
-  pub name: String,
   pub in_c: usize,
   pub out_c: usize,
   /// Weights [out_c * in_c]: w[oc * in_c + ic]
@@ -690,7 +684,6 @@ impl MatMulLayer {
       }
     }
     MatMulLayer {
-      name: desc.name.clone(),
       in_c: ic,
       out_c: oc,
       weights: w,
@@ -717,14 +710,12 @@ impl MatMulLayer {
 // ---------------------------------------------------------------------------
 
 pub struct MatBiasLayer {
-  pub name: String,
   pub weights: Vec<f32>,
 }
 
 impl MatBiasLayer {
   pub fn new(desc: &MatBiasLayerDesc) -> Self {
     MatBiasLayer {
-      name: desc.name.clone(),
       weights: desc.weights.clone(),
     }
   }
@@ -745,16 +736,12 @@ impl MatBiasLayer {
 // ---------------------------------------------------------------------------
 
 pub struct ActivationLayer {
-  pub name: String,
   pub activation: Activation,
 }
 
 impl ActivationLayer {
-  pub fn new(name: impl Into<String>, activation: Activation) -> Self {
-    ActivationLayer {
-      name: name.into(),
-      activation,
-    }
+  pub fn new(activation: Activation) -> Self {
+    ActivationLayer { activation }
   }
 
   pub fn apply_inplace(&self, data: &mut [f32]) {
@@ -877,7 +864,6 @@ pub fn add_nc_bias_inplace(
 pub struct NormActConv {
   pub norm: BatchNormLayer,
   pub conv: ConvLayer,
-  pub in_c: usize,
   pub out_c: usize,
 }
 
@@ -892,7 +878,6 @@ impl NormActConv {
     NormActConv {
       norm: BatchNormLayer::new(bn_desc, act),
       conv: ConvLayer::new(conv_desc, nn_x, nn_y),
-      in_c: conv_desc.in_channels as usize,
       out_c: conv_desc.out_channels as usize,
     }
   }
@@ -919,7 +904,6 @@ impl NormActConv {
 // ---------------------------------------------------------------------------
 
 pub struct ResidualBlock {
-  pub name: String,
   pub nac1: NormActConv,
   pub nac2: NormActConv,
 }
@@ -927,7 +911,6 @@ pub struct ResidualBlock {
 impl ResidualBlock {
   pub fn new(desc: &ResidualBlockDesc, nn_x: usize, nn_y: usize) -> Self {
     ResidualBlock {
-      name: desc.name.clone(),
       nac1: NormActConv::new(
         &desc.pre_bn,
         desc.pre_activation.activation,
@@ -979,7 +962,6 @@ impl ResidualBlock {
 // ---------------------------------------------------------------------------
 
 pub struct GlobalPoolingResidualBlock {
-  pub name: String,
   pub pre_bn: BatchNormLayer,
   pub regular_conv: ConvLayer,
   pub gpool_conv: ConvLayer,
@@ -995,7 +977,6 @@ impl GlobalPoolingResidualBlock {
     nn_y: usize,
   ) -> Self {
     GlobalPoolingResidualBlock {
-      name: desc.name.clone(),
       pre_bn: BatchNormLayer::new(&desc.pre_bn, desc.pre_activation.activation),
       regular_conv: ConvLayer::new(&desc.regular_conv, nn_x, nn_y),
       gpool_conv: ConvLayer::new(&desc.gpool_conv, nn_x, nn_y),
@@ -1166,7 +1147,6 @@ impl BlockStack {
 // ---------------------------------------------------------------------------
 
 pub struct NestedBottleneckResidualBlockLayer {
-  pub name: String,
   pub nac1: NormActConv,
   pub inner: BlockStack,
   pub nac2: NormActConv,
@@ -1179,7 +1159,6 @@ impl NestedBottleneckResidualBlockLayer {
     nn_y: usize,
   ) -> Self {
     NestedBottleneckResidualBlockLayer {
-      name: desc.name.clone(),
       nac1: NormActConv::new(
         &desc.pre_bn,
         desc.pre_activation.activation,
@@ -1250,7 +1229,6 @@ impl NestedBottleneckResidualBlockLayer {
 // ---------------------------------------------------------------------------
 
 pub struct SgfMetadataEncoder {
-  pub name: String,
   pub mul1: MatMulLayer,
   pub bias1: MatBiasLayer,
   pub act1: ActivationLayer,
@@ -1263,13 +1241,12 @@ pub struct SgfMetadataEncoder {
 impl SgfMetadataEncoder {
   pub fn new(desc: &SgfMetadataEncoderDesc) -> Self {
     SgfMetadataEncoder {
-      name: desc.name.clone(),
       mul1: MatMulLayer::new(&desc.mul1),
       bias1: MatBiasLayer::new(&desc.bias1),
-      act1: ActivationLayer::new(&desc.act1.name, desc.act1.activation),
+      act1: ActivationLayer::new(desc.act1.activation),
       mul2: MatMulLayer::new(&desc.mul2),
       bias2: MatBiasLayer::new(&desc.bias2),
-      act2: ActivationLayer::new(&desc.act2.name, desc.act2.activation),
+      act2: ActivationLayer::new(desc.act2.activation),
       mul3: MatMulLayer::new(&desc.mul3),
     }
   }
@@ -1299,7 +1276,6 @@ impl SgfMetadataEncoder {
 // ---------------------------------------------------------------------------
 
 pub struct Trunk {
-  pub name: String,
   pub initial_conv: ConvLayer,
   pub initial_mat_mul: MatMulLayer,
   pub sgf_meta_encoder: Option<SgfMetadataEncoder>,
@@ -1309,13 +1285,12 @@ pub struct Trunk {
 }
 
 impl Trunk {
-  pub fn new(desc: &crate::model::TrunkDesc, nn_x: usize, nn_y: usize) -> Self {
+  pub fn new(desc: &crate::neuralnet::model::TrunkDesc, nn_x: usize, nn_y: usize) -> Self {
     let meta_enc = desc
       .sgf_metadata_encoder
       .as_ref()
       .map(SgfMetadataEncoder::new);
     Trunk {
-      name: desc.name.clone(),
       initial_conv: ConvLayer::new(&desc.initial_conv, nn_x, nn_y),
       initial_mat_mul: MatMulLayer::new(&desc.initial_mat_mul),
       sgf_meta_encoder: meta_enc,
@@ -1392,7 +1367,6 @@ impl Trunk {
 // ---------------------------------------------------------------------------
 
 pub struct PolicyHead {
-  pub name: String,
   pub model_version: i32,
   pub p1_conv: ConvLayer,
   pub g1_conv: ConvLayer,
@@ -1409,12 +1383,11 @@ pub struct PolicyHead {
 
 impl PolicyHead {
   pub fn new(
-    desc: &crate::model::PolicyHeadDesc,
+    desc: &crate::neuralnet::model::PolicyHeadDesc,
     nn_x: usize,
     nn_y: usize,
   ) -> Self {
     PolicyHead {
-      name: desc.name.clone(),
       model_version: 0, // will be set from model
       p1_conv: ConvLayer::new(&desc.p1_conv, nn_x, nn_y),
       g1_conv: ConvLayer::new(&desc.g1_conv, nn_x, nn_y),
@@ -1430,7 +1403,7 @@ impl PolicyHead {
       pass_activation: desc
         .pass_activation
         .as_ref()
-        .map(|a| ActivationLayer::new(&a.name, a.activation)),
+        .map(|a| ActivationLayer::new(a.activation)),
       gpool_to_pass_mul2: desc
         .gpool_to_pass_mul2
         .as_ref()
@@ -1522,7 +1495,6 @@ impl PolicyHead {
 // ---------------------------------------------------------------------------
 
 pub struct ValueHead {
-  pub name: String,
   pub v1_conv: ConvLayer,
   pub v1_bn: BatchNormLayer,
   pub v2_mul: MatMulLayer,
@@ -1537,20 +1509,16 @@ pub struct ValueHead {
 
 impl ValueHead {
   pub fn new(
-    desc: &crate::model::ValueHeadDesc,
+    desc: &crate::neuralnet::model::ValueHeadDesc,
     nn_x: usize,
     nn_y: usize,
   ) -> Self {
     ValueHead {
-      name: desc.name.clone(),
       v1_conv: ConvLayer::new(&desc.v1_conv, nn_x, nn_y),
       v1_bn: BatchNormLayer::new(&desc.v1_bn, desc.v1_activation.activation),
       v2_mul: MatMulLayer::new(&desc.v2_mul),
       v2_bias: MatBiasLayer::new(&desc.v2_bias),
-      v2_activation: ActivationLayer::new(
-        &desc.v2_activation.name,
-        desc.v2_activation.activation,
-      ),
+      v2_activation: ActivationLayer::new(desc.v2_activation.activation),
       v3_mul: MatMulLayer::new(&desc.v3_mul),
       v3_bias: MatBiasLayer::new(&desc.v3_bias),
       sv3_mul: MatMulLayer::new(&desc.sv3_mul),
@@ -1620,7 +1588,6 @@ impl ValueHead {
 // ---------------------------------------------------------------------------
 
 pub struct Model {
-  pub name: String,
   pub model_version: i32,
   pub num_input_channels: usize,
   pub num_input_global_channels: usize,
@@ -1635,9 +1602,8 @@ pub struct Model {
 }
 
 impl Model {
-  pub fn new(desc: &crate::model::ModelDesc, nn_x: usize, nn_y: usize) -> Self {
+  pub fn new(desc: &crate::neuralnet::model::ModelDesc, nn_x: usize, nn_y: usize) -> Self {
     Model {
-      name: desc.name.clone(),
       model_version: desc.model_version,
       num_input_channels: desc.num_input_channels as usize,
       num_input_global_channels: desc.num_input_global_channels as usize,
@@ -1720,7 +1686,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::{
+  use crate::neuralnet::model::{
     Activation, BatchNormLayerDesc, ConvLayerDesc, MatBiasLayerDesc,
     MatMulLayerDesc,
   };
@@ -2268,7 +2234,7 @@ mod tests {
 
   #[test]
   fn activation_layer_relu_inplace() {
-    let layer = ActivationLayer::new("test", Activation::Relu);
+    let layer = ActivationLayer::new(Activation::Relu);
     let mut data = vec![-3.0f32, 0.0, 2.5, -0.1, 4.0];
     layer.apply_inplace(&mut data);
     assert_slice_close(&data, &[0.0, 0.0, 2.5, 0.0, 4.0], 1e-6, "act_relu");
