@@ -15,7 +15,7 @@ use crate::neuralnet::{eval::Evaluator, nninputs};
 
 /// Returns the raw policy logits (channel 0) for every board position,
 /// indexed by `y * nn_x + x`. Positions outside the board are zero.
-pub async fn policy_values(
+async fn policy_values(
   evaluator: &Evaluator,
   board: &Board,
   hist: &BoardHistory,
@@ -168,7 +168,6 @@ mod tests {
   use crate::game::{
     board::{Board, PASS_LOC, Player, location},
     boardhistory::BoardHistory,
-    rules::Rules,
   };
   use crate::neuralnet::eval::Evaluator;
 
@@ -198,7 +197,7 @@ mod tests {
       NUM_SPATIAL, NUM_SPATIAL_V5,
     };
     let board = Board::new(5, 5);
-    let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+    let hist = BoardHistory::new(&board, 7.5);
     let nn_x = 5;
     let nn_y = 5;
 
@@ -239,7 +238,7 @@ mod tests {
   fn fill_row_encodes_pla_stone() {
     use crate::neuralnet::nninputs::{NUM_GLOBAL_V6, NUM_SPATIAL};
     let mut board = Board::new(5, 5);
-    let mut hist = BoardHistory::new(&board, Player::Black, Rules::default());
+    let mut hist = BoardHistory::new(&board, 7.5);
     let loc = location::get_loc(2, 2, 5);
     hist.make_board_move(&mut board, loc, Player::Black, None);
 
@@ -273,10 +272,8 @@ mod tests {
   #[test]
   fn fill_row_global_komi() {
     use crate::neuralnet::nninputs::{NUM_GLOBAL_V6, NUM_SPATIAL};
-    let mut rules = Rules::default();
-    rules.komi = 6.5;
     let board = Board::new(5, 5);
-    let hist = BoardHistory::new(&board, Player::Black, rules);
+    let hist = BoardHistory::new(&board, 6.5);
     let nn_x = 5;
     let nn_y = 5;
     let nc = NUM_SPATIAL;
@@ -343,7 +340,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(19, 19);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let mv = genmove(&ev, &board, &hist, Player::Black).await;
       assert_ne!(
         mv, PASS_LOC,
@@ -360,7 +357,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(19, 19);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let mv = genmove(&ev, &board, &hist, Player::Black).await;
       assert!(
         hist.is_legal(&board, mv, Player::Black),
@@ -378,7 +375,7 @@ mod tests {
     pollster::block_on(async {
       let mut board = Board::new(1, 1);
       board.play_move_assume_legal(location::get_loc(0, 0, 1), Player::Black);
-      let hist = BoardHistory::new(&board, Player::White, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let mv = genmove(&ev, &board, &hist, Player::White).await;
       assert_eq!(mv, PASS_LOC, "expected pass on full board, got {mv}");
     });
@@ -393,7 +390,7 @@ mod tests {
     };
     pollster::block_on(async {
       let mut board = Board::new(19, 19);
-      let mut hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let mut hist = BoardHistory::new(&board, 7.5);
       hist.make_board_move(
         &mut board,
         location::get_loc(9, 9, 19),
@@ -417,7 +414,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(9, 9);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let mv = genmove(&ev, &board, &hist, Player::Black).await;
       assert_ne!(mv, PASS_LOC, "expected non-pass on empty 9×9");
       assert!(
@@ -442,7 +439,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(19, 19);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       for _ in 0..5 {
         let mv = genmove(&ev, &board, &hist, Player::Black).await;
         assert!(
@@ -462,7 +459,7 @@ mod tests {
     };
     pollster::block_on(async {
       let mut board = Board::new(19, 19);
-      let mut hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let mut hist = BoardHistory::new(&board, 7.5);
       hist.make_board_move(&mut board, PASS_LOC, Player::Black, None);
       hist.make_board_move(&mut board, PASS_LOC, Player::White, None);
       let mv = genmove(&ev, &board, &hist, Player::Black).await;
@@ -496,7 +493,7 @@ mod tests {
 
     // Non-trivial position: two stones on a 9×9.
     let mut board = Board::new(9, 9);
-    let mut hist = BoardHistory::new(&board, Player::Black, Rules::default());
+    let mut hist = BoardHistory::new(&board, 7.5);
     hist.make_board_move(
       &mut board,
       location::get_loc(4, 4, 9),
@@ -591,7 +588,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(19, 19);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let nn = position_eval(&ev, &board, &hist, Player::Black).await;
       let sum =
         nn.white_win_prob + nn.white_loss_prob + nn.white_no_result_prob;
@@ -610,7 +607,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(19, 19);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let nn = position_eval(&ev, &board, &hist, Player::Black).await;
       assert!(
         nn.white_score_mean.is_finite(),
@@ -628,7 +625,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(9, 9);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let nn = position_eval(&ev, &board, &hist, Player::Black).await;
       // policy_probs has nn_len² + 1 entries (last = pass)
       assert_eq!(nn.policy_probs.len(), 9 * 9 + 1);
@@ -646,7 +643,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(19, 19);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let nn = position_eval(&ev, &board, &hist, Player::Black).await;
       assert!(
         nn.white_win_prob < 0.9,
@@ -673,7 +670,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(9, 9);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let vals = policy_values(&ev, &board, &hist, Player::Black).await;
       assert_eq!(vals.len(), 9 * 9, "expected 81 values for 9×9 board");
     });
@@ -687,7 +684,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(19, 19);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let vals = policy_values(&ev, &board, &hist, Player::Black).await;
       for (i, &v) in vals.iter().enumerate() {
         assert!(v.is_finite(), "policy_values[{i}] = {v} is not finite");
@@ -703,7 +700,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(9, 9);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let v1 = policy_values(&ev, &board, &hist, Player::Black).await;
       let v2 = policy_values(&ev, &board, &hist, Player::Black).await;
       assert_eq!(v1, v2, "policy_values must be deterministic");
@@ -719,7 +716,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(19, 19);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let nn_x = ev.nn_x;
 
       let vals = policy_values(&ev, &board, &hist, Player::Black).await;
@@ -755,7 +752,7 @@ mod tests {
     };
     pollster::block_on(async {
       let board = Board::new(9, 9);
-      let hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let hist = BoardHistory::new(&board, 7.5);
       let black = policy_values(&ev, &board, &hist, Player::Black).await;
       let white = policy_values(&ev, &board, &hist, Player::White).await;
       assert_ne!(
@@ -773,13 +770,12 @@ mod tests {
     };
     pollster::block_on(async {
       let board_empty = Board::new(9, 9);
-      let hist_empty =
-        BoardHistory::new(&board_empty, Player::Black, Rules::default());
+      let hist_empty = BoardHistory::new(&board_empty, 7.5);
       let before =
         policy_values(&ev, &board_empty, &hist_empty, Player::Black).await;
 
       let mut board = Board::new(9, 9);
-      let mut hist = BoardHistory::new(&board, Player::Black, Rules::default());
+      let mut hist = BoardHistory::new(&board, 7.5);
       hist.make_board_move(
         &mut board,
         location::get_loc(4, 4, 9),

@@ -15,7 +15,6 @@
 use crate::game::{
   board::{Board, Loc, NULL_LOC, PASS_LOC, Player, location},
   boardhistory::BoardHistory,
-  rules::{KoRule, ScoringRule, TaxRule},
 };
 
 // ---------------------------------------------------------------------------
@@ -178,7 +177,7 @@ pub fn fill_row(
 
   let board_area = (board.x_size * board.y_size) as f32;
   let self_komi = {
-    let raw = hist.rules.komi;
+    let raw = hist.komi;
     if pla == Player::White { raw } else { -raw }
   };
   let self_komi = self_komi.max(-(board_area + 1.0)).min(board_area + 1.0);
@@ -193,30 +192,18 @@ pub fn fill_row(
     out_global[5] = self_komi / div;
   }
 
-  // Global[6,7]: ko rule encoding
+  // Global[6,7]: ko rule — Tromp-Taylor uses positional superko.
   if num_global > 7 {
-    match hist.rules.ko_rule {
-      KoRule::Simple => {}
-      KoRule::Positional | KoRule::Spight => {
-        out_global[6] = 1.0;
-        out_global[7] = 0.5;
-      }
-      KoRule::Situational => {
-        out_global[6] = 1.0;
-        out_global[7] = -0.5;
-      }
-    }
+    out_global[6] = 1.0;
+    out_global[7] = 0.5;
   }
 
-  // Global[8]: multi-stone suicide legal
-  if num_global > 8 && hist.rules.multi_stone_suicide_legal {
+  // Global[8]: multi-stone suicide legal — always true in Tromp-Taylor.
+  if num_global > 8 {
     out_global[8] = 1.0;
   }
 
-  // Global[9]: territory scoring
-  if num_global > 9 && hist.rules.scoring_rule == ScoringRule::Territory {
-    out_global[9] = 1.0;
-  }
+  // Global[9]: territory scoring — always 0 (area scoring).
 
   // Version-specific tail features
   match num_global {
@@ -230,14 +217,7 @@ pub fn fill_row(
       }
       let pass_end = hist.pass_would_end_game(board, pla);
       out_global[12] = if pass_end { 1.0 } else { 0.0 };
-      set_komi_parity(
-        self_komi,
-        &hist.rules,
-        hist.encore_phase,
-        board,
-        13,
-        out_global,
-      );
+      set_komi_parity(self_komi, hist.encore_phase, board, 13, out_global);
     }
     12 => {
       // V5: encore=10,11 only
@@ -250,72 +230,16 @@ pub fn fill_row(
     }
     16 | 19 => {
       // V6 (16) and V7 (19, extras at 16-18 left as zero)
-      //   10,11: tax rule
-      //   12,13: encore phase
+      //   10,11: tax rule — TaxRule::None, both 0
+      //   12,13: encore phase — always 0
       //   14: pass would end phase
       //   15: komi parity
-      match hist.rules.tax_rule {
-        TaxRule::None => {}
-        TaxRule::Seki => {
-          out_global[10] = 1.0;
-        }
-        TaxRule::All => {
-          out_global[10] = 1.0;
-          out_global[11] = 1.0;
-        }
-      }
-      if hist.encore_phase > 0 {
-        out_global[12] = 1.0;
-      }
-      if hist.encore_phase > 1 {
-        out_global[13] = 1.0;
-      }
       let pass_end = hist.pass_would_end_game(board, pla);
       out_global[14] = if pass_end { 1.0 } else { 0.0 };
-      set_komi_parity(
-        self_komi,
-        &hist.rules,
-        hist.encore_phase,
-        board,
-        15,
-        out_global,
-      );
+      set_komi_parity(self_komi, hist.encore_phase, board, 15, out_global);
       // V7 extras [16,17,18] remain 0
     }
-    _ => {
-      // Unknown version: best effort — V6-style if enough room
-      if num_global >= 16 {
-        match hist.rules.tax_rule {
-          TaxRule::None => {}
-          TaxRule::Seki => {
-            if num_global > 10 {
-              out_global[10] = 1.0;
-            }
-          }
-          TaxRule::All => {
-            if num_global > 10 {
-              out_global[10] = 1.0;
-            }
-            if num_global > 11 {
-              out_global[11] = 1.0;
-            }
-          }
-        }
-        if num_global > 12 && hist.encore_phase > 0 {
-          out_global[12] = 1.0;
-        }
-        if num_global > 13 && hist.encore_phase > 1 {
-          out_global[13] = 1.0;
-        }
-      } else if num_global >= 12 {
-        if num_global > 10 && hist.encore_phase > 0 {
-          out_global[10] = 1.0;
-        }
-        if num_global > 11 && hist.encore_phase > 1 {
-          out_global[11] = 1.0;
-        }
-      }
-    }
+    _ => {}
   }
 }
 
@@ -396,7 +320,6 @@ fn encode_prev_moves(
 
 fn set_komi_parity(
   self_komi: f32,
-  rules: &crate::game::rules::Rules,
   encore_phase: i32,
   board: &Board,
   idx: usize,
@@ -405,7 +328,9 @@ fn set_komi_parity(
   if global.len() <= idx {
     return;
   }
-  if rules.scoring_rule != ScoringRule::Area && encore_phase < 2 {
+  // Tromp-Taylor uses area scoring, so komi parity is always computed.
+  // (scoring_rule != Area check removed — it was the only early-return case.)
+  if encore_phase >= 2 {
     return;
   }
 

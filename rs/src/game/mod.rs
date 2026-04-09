@@ -5,7 +5,6 @@
 
 pub mod board;
 pub mod boardhistory;
-pub mod rules;
 
 // ---------------------------------------------------------------------------
 // Hash128 — 128-bit Zobrist hash, matches Hash128 in cpp/core/hash.h

@@ -8,7 +8,6 @@ use crate::game::{
     Board, Color, KO_MARK_HASH, Loc, MAX_ARR_SIZE, Move, NULL_LOC, PASS_LOC,
     Player, ZOBRIST_PLAYER_HASH, location,
   },
-  rules::{KoRule, Rules},
 };
 
 // ---------------------------------------------------------------------------
@@ -101,9 +100,10 @@ impl Default for KoHashTable {
 // ---------------------------------------------------------------------------
 
 /// Complete game state including history of moves, ko bans, and scoring.
+/// Rules are fixed to Tromp-Taylor: positional superko, area scoring, suicide legal.
 #[derive(Clone)]
 pub struct BoardHistory {
-  pub rules: Rules,
+  pub komi: f32,
   pub move_history: Vec<Move>,
   pub ko_hash_history: Vec<Hash128>,
   pub first_turn_idx_with_ko_history: usize,
@@ -120,9 +120,9 @@ impl BoardHistory {
   // Construction
   // -----------------------------------------------------------------------
 
-  pub fn new(board: &Board, next_player: Player, rules: Rules) -> Self {
+  pub fn new(board: &Board, komi: f32) -> Self {
     let mut h = BoardHistory {
-      rules,
+      komi,
       move_history: Vec::new(),
       ko_hash_history: Vec::new(),
       first_turn_idx_with_ko_history: 0,
@@ -133,12 +133,12 @@ impl BoardHistory {
       ko_recap_blocked: [false; MAX_ARR_SIZE],
       ko_captures_in_encore: Vec::new(),
     };
-    h.clear(board, next_player);
+    h.clear(board);
     h
   }
 
   /// Reset history to the initial state for the given board position.
-  pub fn clear(&mut self, board: &Board, next_player: Player) {
+  pub fn clear(&mut self, board: &Board) {
     self.move_history.clear();
     self.ko_hash_history.clear();
     self.first_turn_idx_with_ko_history = 0;
@@ -160,8 +160,7 @@ impl BoardHistory {
     }
 
     // Push the initial ko hash.
-    let ko_hash =
-      Self::get_ko_hash(&self.rules, board, next_player, 0, Hash128::ZERO);
+    let ko_hash = Self::get_ko_hash(board, 0, Hash128::ZERO);
     self.ko_hash_history.push(ko_hash);
   }
 
@@ -169,35 +168,23 @@ impl BoardHistory {
   // Ko hash computation
   // -----------------------------------------------------------------------
 
+  // Tromp-Taylor: positional superko — ko hash is just board position hash.
   fn get_ko_hash(
-    rules: &Rules,
     board: &Board,
-    pla: Player,
     encore_phase: i32,
     ko_recap_block_hash: Hash128,
   ) -> Hash128 {
-    let player_hash = ZOBRIST_PLAYER_HASH[pla as usize];
-    if rules.ko_rule == KoRule::Situational
-      || rules.ko_rule == KoRule::Simple
-      || encore_phase > 0
-    {
+    if encore_phase > 0 {
+      let player_hash = ZOBRIST_PLAYER_HASH[0]; // unused in practice
       board.pos_hash ^ player_hash ^ ko_recap_block_hash
     } else {
-      board.pos_hash ^ ko_recap_block_hash
+      board.pos_hash
     }
   }
 
-  fn get_ko_hash_after_move_non_encore(
-    rules: &Rules,
-    pos_hash_after: Hash128,
-    pla: Player,
-  ) -> Hash128 {
-    let player_hash = ZOBRIST_PLAYER_HASH[pla as usize];
-    if rules.ko_rule == KoRule::Situational || rules.ko_rule == KoRule::Simple {
-      pos_hash_after ^ player_hash
-    } else {
-      pos_hash_after
-    }
+  fn get_ko_hash_after_move_non_encore(pos_hash_after: Hash128) -> Hash128 {
+    // Positional superko: no player-hash mixing.
+    pos_hash_after
   }
 
   // -----------------------------------------------------------------------
@@ -232,7 +219,8 @@ impl BoardHistory {
     if loc == PASS_LOC {
       return true;
     }
-    if !board.is_legal(loc, pla, self.rules.multi_stone_suicide_legal) {
+    // Tromp-Taylor: multi-stone suicide is legal.
+    if !board.is_legal(loc, pla, true) {
       return false;
     }
     if self.super_ko_banned[loc as usize] {
@@ -246,9 +234,8 @@ impl BoardHistory {
   // -----------------------------------------------------------------------
 
   fn phase_has_spightlike_ending(&self) -> bool {
+    // Tromp-Taylor: positional superko — no Spight/Simple-like clearing.
     self.encore_phase > 0
-      || self.rules.ko_rule == KoRule::Simple
-      || self.rules.ko_rule == KoRule::Spight
   }
 
   pub fn pass_would_end_phase(&self, _board: &Board, _pla: Player) -> bool {
@@ -305,15 +292,9 @@ impl BoardHistory {
     // Compute and record the new ko hash.
     let opp = pla.opponent();
     let new_ko_hash = if self.encore_phase == 0 {
-      Self::get_ko_hash_after_move_non_encore(&self.rules, board.pos_hash, opp)
+      Self::get_ko_hash_after_move_non_encore(board.pos_hash)
     } else {
-      Self::get_ko_hash(
-        &self.rules,
-        board,
-        opp,
-        self.encore_phase,
-        ko_recap_block_hash,
-      )
+      Self::get_ko_hash(board, self.encore_phase, ko_recap_block_hash)
     };
 
     // Clear ko history on Spight/Simple/encore passes.
@@ -366,33 +347,23 @@ impl BoardHistory {
   ) {
     self.super_ko_banned = [false; MAX_ARR_SIZE];
 
-    if self.encore_phase == 0 && self.rules.ko_rule != KoRule::Simple {
-      // Positional/situational/Spight superko.
+    if self.encore_phase == 0 {
+      // Tromp-Taylor positional superko.
       for y in 0..board.y_size {
         for x in 0..board.x_size {
           let loc = location::get_loc(x, y, board.x_size);
           let idx = loc as usize;
-          if board.colors[idx] != Color::Empty
-            || board.is_suicide(loc, next_player)
-              && !self.rules.multi_stone_suicide_legal
-            || board.ko_loc == loc
-          {
-            // Not empty or already illegal — not ko-banned specifically.
+          if board.colors[idx] != Color::Empty || board.ko_loc == loc {
             continue;
           }
-          // Only check superko for locations that were ever occupied/played
-          // OR could be a ko capture.
           if !self.was_ever_occupied_or_played[idx]
             && !board.would_be_ko_capture(loc, next_player)
           {
             continue;
           }
           let pos_hash_after = board.get_pos_hash_after_move(loc, next_player);
-          let ko_hash_after = Self::get_ko_hash_after_move_non_encore(
-            &self.rules,
-            pos_hash_after,
-            next_player.opponent(),
-          );
+          let ko_hash_after =
+            Self::get_ko_hash_after_move_non_encore(pos_hash_after);
           if let Some(table) = root_table {
             if self.ko_hash_occurs_in_history(ko_hash_after, table) {
               self.super_ko_banned[idx] = true;
@@ -405,7 +376,7 @@ impl BoardHistory {
           }
         }
       }
-    } else if self.encore_phase > 0 {
+    } else {
       // Encore: forbidden only if this exact (pos_hash, loc, pla) was seen before.
       for ekc in &self.ko_captures_in_encore {
         if ekc.pos_hash_before_move == board.pos_hash
@@ -430,7 +401,7 @@ mod tests {
 
   fn make_game() -> (Board, BoardHistory) {
     let b = Board::new(9, 9);
-    let h = BoardHistory::new(&b, Player::Black, Rules::default());
+    let h = BoardHistory::new(&b, 7.5);
     (b, h)
   }
 
