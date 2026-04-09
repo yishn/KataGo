@@ -5,15 +5,16 @@
 /// time via [`BackendKind`].
 ///
 /// ```ignore
-/// // CPU backend (default, backward-compatible)
+/// // CPU backend (default, backward-compatible, sync)
 /// let ev = Evaluator::new(&desc, 19, 19);
 ///
-/// // WebGPU backend (falls back to CPU if no GPU adapter is found)
-/// let ev = Evaluator::with_backend(&desc, 19, 19, BackendKind::Wgpu);
+/// // WebGPU backend (async constructor)
+/// let ev = Evaluator::with_backend(&desc, 19, 19, BackendKind::Wgpu).await;
 /// ```
 
 use crate::model::ModelDesc;
 use crate::neuralnet::backend::{self, BackendKind};
+use crate::neuralnet::backend_cpu::CpuBackend;
 
 // Re-export EvalOutput from the backend module so existing import paths keep working.
 pub use crate::neuralnet::backend::EvalOutput;
@@ -24,7 +25,8 @@ pub use crate::neuralnet::backend::EvalOutput;
 
 /// A loaded, inference-ready neural network.
 ///
-/// Create via [`Evaluator::new`] (CPU) or [`Evaluator::with_backend`] (explicit).
+/// Create via [`Evaluator::new`] (CPU, sync) or [`Evaluator::with_backend`]
+/// (explicit backend, async).
 pub struct Evaluator {
   backend: Box<dyn backend::Backend>,
   pub nn_x: usize,
@@ -39,33 +41,24 @@ pub struct Evaluator {
 }
 
 impl Evaluator {
-  /// Build a CPU-backed evaluator (backward-compatible).
+  /// Build a CPU-backed evaluator synchronously (backward-compatible).
   pub fn new(desc: &ModelDesc, nn_x: usize, nn_y: usize) -> Self {
-    Self::with_backend(desc, nn_x, nn_y, BackendKind::Cpu)
+    let b: Box<dyn backend::Backend> =
+      Box::new(CpuBackend::new(desc, nn_x, nn_y));
+    Self::from_backend(b, nn_x, nn_y)
   }
 
-  /// Build an evaluator with an explicit [`BackendKind`].
+  /// Build an evaluator with an explicit [`BackendKind`] (async).
   ///
   /// If the requested backend is unavailable the factory falls back to CPU.
-  pub fn with_backend(
+  pub async fn with_backend(
     desc: &ModelDesc,
     nn_x: usize,
     nn_y: usize,
     kind: BackendKind,
   ) -> Self {
-    let b = backend::build(desc, nn_x, nn_y, kind);
-    Evaluator {
-      nn_x,
-      nn_y,
-      model_version: b.model_version(),
-      num_input_channels: b.num_input_channels(),
-      num_input_global_channels: b.num_input_global_channels(),
-      num_policy_channels: b.num_policy_channels(),
-      num_value_channels: b.num_value_channels(),
-      num_score_value_channels: b.num_score_value_channels(),
-      num_ownership_channels: b.num_ownership_channels(),
-      backend: b,
-    }
+    let b = backend::build(desc, nn_x, nn_y, kind).await;
+    Self::from_backend(b, nn_x, nn_y)
   }
 
   /// Wrap a pre-built backend directly.
@@ -84,16 +77,16 @@ impl Evaluator {
     }
   }
 
-  /// Run the network for a single board position (batch size 1).
-  pub fn run(&self, spatial: &[f32], global: &[f32]) -> EvalOutput {
+  /// Run the network for a single board position (batch size 1) — async.
+  pub async fn run(&self, spatial: &[f32], global: &[f32]) -> EvalOutput {
     let hw = self.nn_x * self.nn_y;
     debug_assert_eq!(spatial.len(), hw * self.num_input_channels, "spatial length mismatch");
     debug_assert_eq!(global.len(), self.num_input_global_channels, "global length mismatch");
-    self.backend.run(spatial, global, None, self.nn_x, self.nn_y)
+    self.backend.run(spatial, global, None, self.nn_x, self.nn_y).await
   }
 
-  /// Run the network with optional SGF metadata features.
-  pub fn run_with_meta(
+  /// Run the network with optional SGF metadata features — async.
+  pub async fn run_with_meta(
     &self,
     spatial: &[f32],
     global: &[f32],
@@ -102,6 +95,27 @@ impl Evaluator {
     let hw = self.nn_x * self.nn_y;
     debug_assert_eq!(spatial.len(), hw * self.num_input_channels);
     debug_assert_eq!(global.len(), self.num_input_global_channels);
-    self.backend.run(spatial, global, meta, self.nn_x, self.nn_y)
+    self.backend.run(spatial, global, meta, self.nn_x, self.nn_y).await
+  }
+
+  /// Blocking (sync) inference, for use in non-async contexts on native targets.
+  ///
+  /// Wraps [`run`] in [`pollster::block_on`].  Not available on `wasm32`.
+  #[cfg(not(target_arch = "wasm32"))]
+  pub fn run_blocking(&self, spatial: &[f32], global: &[f32]) -> EvalOutput {
+    pollster::block_on(self.run(spatial, global))
+  }
+
+  /// Blocking (sync) inference with optional SGF metadata, for native use.
+  ///
+  /// Not available on `wasm32`.
+  #[cfg(not(target_arch = "wasm32"))]
+  pub fn run_with_meta_blocking(
+    &self,
+    spatial: &[f32],
+    global: &[f32],
+    meta: Option<&[f32]>,
+  ) -> EvalOutput {
+    pollster::block_on(self.run_with_meta(spatial, global, meta))
   }
 }

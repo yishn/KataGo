@@ -12,6 +12,8 @@
 /// 3. Build it from a [`crate::model::ModelDesc`] using whichever initialiser
 ///    your struct exposes.
 /// 4. Pass it to [`super::eval::Evaluator::from_backend`].
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::model::ModelDesc;
 
@@ -48,29 +50,37 @@ pub struct EvalOutput {
 }
 
 // ---------------------------------------------------------------------------
+// RunFuture — the return type of Backend::run
+// ---------------------------------------------------------------------------
+
+/// Boxed, lifetime-bound future returned by [`Backend::run`].
+pub type RunFuture<'a> = Pin<Box<dyn Future<Output = EvalOutput> + 'a>>;
+
+// ---------------------------------------------------------------------------
 // Backend trait
 // ---------------------------------------------------------------------------
 
-/// Synchronous inference backend.
+/// Async inference backend.
 ///
-/// All methods receive the board dimensions because the same compiled model
-/// can service different board sizes (the CPU backend pre-computes Winograd
-/// tiles per size; GPU backends may need to rebuild pipelines lazily).
-pub trait Backend: Send + Sync {
+/// `run` returns a [`RunFuture`] so that GPU-backed implementations can
+/// yield while waiting for device readback without blocking the calling
+/// thread.  CPU implementations simply wrap their synchronous result in
+/// `std::future::ready(…)`.
+pub trait Backend {
   /// Run a single-position (batch = 1) forward pass.
   ///
   /// * `spatial`  – NHWC spatial features `[H * W * C_spatial]`
   /// * `global`   – global features `[C_global]`
   /// * `meta`     – optional SGF metadata features `[C_meta]`
   /// * `nn_x`, `nn_y` – board width / height the evaluator was built for
-  fn run(
-    &self,
-    spatial: &[f32],
-    global: &[f32],
-    meta: Option<&[f32]>,
+  fn run<'a>(
+    &'a self,
+    spatial: &'a [f32],
+    global: &'a [f32],
+    meta: Option<&'a [f32]>,
     nn_x: usize,
     nn_y: usize,
-  ) -> EvalOutput;
+  ) -> RunFuture<'a>;
 
   // Metadata that callers may query without running inference.
   fn model_version(&self) -> i32;
@@ -105,32 +115,30 @@ pub enum BackendKind {
 ///
 /// Falls back silently to [`BackendKind::Cpu`] when the requested backend is
 /// unavailable (e.g. no GPU adapter found on the current machine).
-pub fn build(desc: &ModelDesc, nn_x: usize, nn_y: usize, kind: BackendKind)
-  -> Box<dyn Backend>
-{
+pub async fn build(
+  desc: &ModelDesc,
+  nn_x: usize,
+  nn_y: usize,
+  kind: BackendKind,
+) -> Box<dyn Backend> {
   match kind {
-    BackendKind::Cpu => {
-      Box::new(crate::neuralnet::backend_cpu::CpuBackend::new(desc, nn_x, nn_y))
-    }
+    BackendKind::Cpu => Box::new(
+      crate::neuralnet::backend_cpu::CpuBackend::new(desc, nn_x, nn_y),
+    ),
     BackendKind::Wgpu => {
-      #[cfg(not(target_arch = "wasm32"))]
+      match crate::neuralnet::backend_wgpu::WgpuBackend::new(desc, nn_x, nn_y)
+        .await
       {
-        match crate::neuralnet::backend_wgpu::WgpuBackend::new(desc, nn_x, nn_y) {
-          Ok(b) => return Box::new(b),
-          Err(e) => {
-            eprintln!(
-              "[katago-rs] WebGPU backend unavailable ({e}), falling back to CPU"
-            );
-          }
+        Ok(b) => Box::new(b) as Box<dyn Backend>,
+        Err(e) => {
+          eprintln!(
+            "[katago-rs] WebGPU backend unavailable ({e}), falling back to CPU"
+          );
+          Box::new(crate::neuralnet::backend_cpu::CpuBackend::new(
+            desc, nn_x, nn_y,
+          ))
         }
       }
-      #[cfg(target_arch = "wasm32")]
-      {
-        eprintln!(
-          "[katago-rs] WebGPU backend not yet wired for wasm32, using CPU"
-        );
-      }
-      Box::new(crate::neuralnet::backend_cpu::CpuBackend::new(desc, nn_x, nn_y))
     }
   }
 }

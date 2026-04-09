@@ -2,7 +2,7 @@
 ///
 /// Backends available:
 /// * [`backend_cpu`] — pure-Rust CPU backend (always available, WASM-compatible)
-/// * [`backend_wgpu`] — WebGPU backend via the `wgpu` crate (non-WASM)
+/// * [`backend_wgpu`] — WebGPU backend via the `wgpu` crate (native + WASM)
 ///
 /// Layout conventions (matching C++ Eigen backend NHWC):
 ///   4-D tensors: [C, X, Y, N] in column-major == [N][Y][X][C] row-major.
@@ -11,7 +11,6 @@
 
 pub mod backend;
 pub mod backend_cpu;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod backend_wgpu;
 pub mod eval;
 pub mod genmove;

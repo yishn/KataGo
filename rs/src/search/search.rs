@@ -194,7 +194,7 @@ impl Search {
     fill_row_v7(board, hist, pla, self.nn_len, &mut spatial, &mut global);
 
     // The Evaluator expects NHWC spatial and global shaped for a batch of 1
-    let eval_out: EvalOutput = evaluator.run(&spatial, &global);
+    let eval_out: EvalOutput = evaluator.run_blocking(&spatial, &global);
 
     extract_nn_output(
       &eval_out,

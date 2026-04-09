@@ -20,7 +20,7 @@ use crate::neuralnet::{eval::Evaluator, nninputs};
 /// 3. Among all legal, non-pass board positions returns the one with the
 ///    highest policy logit (channel 0 of `policy_spatial`).
 /// 4. Returns [`PASS_LOC`] if no legal non-pass move exists.
-pub fn genmove(
+pub async fn genmove(
   evaluator: &Evaluator,
   board: &Board,
   hist: &BoardHistory,
@@ -47,7 +47,7 @@ pub fn genmove(
     &mut global,
   );
 
-  let output = evaluator.run(&spatial, &global);
+  let output = evaluator.run(&spatial, &global).await;
 
   // Pick the legal non-pass position with the highest policy logit (channel 0).
   let mut best_loc = PASS_LOC;
@@ -214,7 +214,7 @@ mod tests {
     let path = workspace_root().join(".network.bin.gz");
     let desc = crate::model::ModelDesc::load_from_file(&path)
       .expect(".network.bin.gz should be present and parseable");
-    match crate::neuralnet::backend_wgpu::WgpuBackend::new(&desc, nn_x, nn_y) {
+    match pollster::block_on(crate::neuralnet::backend_wgpu::WgpuBackend::new(&desc, nn_x, nn_y)) {
       Ok(b) => Some(Evaluator::from_backend(Box::new(b), nn_x, nn_y)),
       Err(e) => {
         eprintln!("[wgpu-test] WebGPU unavailable: {e}. Skipping.");
@@ -232,10 +232,12 @@ mod tests {
   #[cfg(not(target_arch = "wasm32"))]
   fn wgpu_smoke_genmove_not_pass() {
     let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
-    let board = Board::new(19, 19);
-    let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-    let mv = genmove(&ev, &board, &hist, Player::Black);
-    assert_ne!(mv, PASS_LOC, "wgpu genmove on empty 19×19 returned pass (loc={mv})");
+    pollster::block_on(async {
+      let board = Board::new(19, 19);
+      let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
+      let mv = genmove(&ev, &board, &hist, Player::Black).await;
+      assert_ne!(mv, PASS_LOC, "wgpu genmove on empty 19×19 returned pass (loc={mv})");
+    });
   }
 
   /// wgpu backend must return a legal move on an empty board.
@@ -243,13 +245,15 @@ mod tests {
   #[cfg(not(target_arch = "wasm32"))]
   fn wgpu_genmove_returns_legal_move() {
     let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
-    let board = Board::new(19, 19);
-    let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-    let mv = genmove(&ev, &board, &hist, Player::Black);
-    assert!(
-      hist.is_legal(&board, mv, Player::Black),
-      "wgpu genmove returned illegal move {mv}"
-    );
+    pollster::block_on(async {
+      let board = Board::new(19, 19);
+      let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
+      let mv = genmove(&ev, &board, &hist, Player::Black).await;
+      assert!(
+        hist.is_legal(&board, mv, Player::Black),
+        "wgpu genmove returned illegal move {mv}"
+      );
+    });
   }
 
   /// On a fully occupied 1×1 board the wgpu backend must return pass.
@@ -257,11 +261,13 @@ mod tests {
   #[cfg(not(target_arch = "wasm32"))]
   fn wgpu_genmove_full_board_returns_pass() {
     let Some(ev) = try_load_wgpu_evaluator(1, 1) else { return };
-    let mut board = Board::new(1, 1);
-    board.play_move_assume_legal(location::get_loc(0, 0, 1), Player::Black);
-    let hist = BoardHistory::new(&board, Player::White, Rules::default(), 0);
-    let mv = genmove(&ev, &board, &hist, Player::White);
-    assert_eq!(mv, PASS_LOC, "expected pass on full board, got {mv}");
+    pollster::block_on(async {
+      let mut board = Board::new(1, 1);
+      board.play_move_assume_legal(location::get_loc(0, 0, 1), Player::Black);
+      let hist = BoardHistory::new(&board, Player::White, Rules::default(), 0);
+      let mv = genmove(&ev, &board, &hist, Player::White).await;
+      assert_eq!(mv, PASS_LOC, "expected pass on full board, got {mv}");
+    });
   }
 
   /// After one Black move at tengen, the wgpu backend returns a legal
@@ -270,15 +276,17 @@ mod tests {
   #[cfg(not(target_arch = "wasm32"))]
   fn wgpu_genmove_after_one_move() {
     let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
-    let mut board = Board::new(19, 19);
-    let mut hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-    hist.make_board_move(&mut board, location::get_loc(9, 9, 19), Player::Black, None);
-    let mv = genmove(&ev, &board, &hist, Player::White);
-    assert_ne!(mv, PASS_LOC, "expected non-pass after one move");
-    assert!(
-      hist.is_legal(&board, mv, Player::White),
-      "wgpu genmove returned illegal move {mv}"
-    );
+    pollster::block_on(async {
+      let mut board = Board::new(19, 19);
+      let mut hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
+      hist.make_board_move(&mut board, location::get_loc(9, 9, 19), Player::Black, None);
+      let mv = genmove(&ev, &board, &hist, Player::White).await;
+      assert_ne!(mv, PASS_LOC, "expected non-pass after one move");
+      assert!(
+        hist.is_legal(&board, mv, Player::White),
+        "wgpu genmove returned illegal move {mv}"
+      );
+    });
   }
 
   /// On a 9×9 board the wgpu preferred move should be legal and within the grid.
@@ -286,14 +294,16 @@ mod tests {
   #[cfg(not(target_arch = "wasm32"))]
   fn wgpu_genmove_9x9_is_legal_on_board() {
     let Some(ev) = try_load_wgpu_evaluator(9, 9) else { return };
-    let board = Board::new(9, 9);
-    let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-    let mv = genmove(&ev, &board, &hist, Player::Black);
-    assert_ne!(mv, PASS_LOC, "expected non-pass on empty 9×9");
-    assert!(hist.is_legal(&board, mv, Player::Black), "move {mv} is illegal on 9×9");
-    let x = location::get_x(mv, 9);
-    let y = location::get_y(mv, 9);
-    assert!(x < 9 && y < 9, "wgpu move ({x},{y}) is outside the 9×9 board");
+    pollster::block_on(async {
+      let board = Board::new(9, 9);
+      let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
+      let mv = genmove(&ev, &board, &hist, Player::Black).await;
+      assert_ne!(mv, PASS_LOC, "expected non-pass on empty 9×9");
+      assert!(hist.is_legal(&board, mv, Player::Black), "move {mv} is illegal on 9×9");
+      let x = location::get_x(mv, 9);
+      let y = location::get_y(mv, 9);
+      assert!(x < 9 && y < 9, "wgpu move ({x},{y}) is outside the 9×9 board");
+    });
   }
 
   /// Two consecutive wgpu forward passes with identical inputs must agree.
@@ -301,11 +311,13 @@ mod tests {
   #[cfg(not(target_arch = "wasm32"))]
   fn wgpu_genmove_is_deterministic() {
     let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
-    let board = Board::new(19, 19);
-    let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-    let mv1 = genmove(&ev, &board, &hist, Player::Black);
-    let mv2 = genmove(&ev, &board, &hist, Player::Black);
-    assert_eq!(mv1, mv2, "wgpu genmove must be deterministic");
+    pollster::block_on(async {
+      let board = Board::new(19, 19);
+      let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
+      let mv1 = genmove(&ev, &board, &hist, Player::Black).await;
+      let mv2 = genmove(&ev, &board, &hist, Player::Black).await;
+      assert_eq!(mv1, mv2, "wgpu genmove must be deterministic");
+    });
   }
 
   /// After both players pass, the wgpu backend still returns a legal move (or
@@ -314,16 +326,18 @@ mod tests {
   #[cfg(not(target_arch = "wasm32"))]
   fn wgpu_genmove_after_two_passes_returns_legal() {
     let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
-    let mut board = Board::new(19, 19);
-    let mut hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-    hist.make_board_move(&mut board, PASS_LOC, Player::Black, None);
-    hist.make_board_move(&mut board, PASS_LOC, Player::White, None);
-    let mv = genmove(&ev, &board, &hist, Player::Black);
-    if hist.is_game_finished {
-      assert_eq!(mv, PASS_LOC, "game over: expected pass");
-    } else {
-      assert!(hist.is_legal(&board, mv, Player::Black), "wgpu returned illegal move {mv}");
-    }
+    pollster::block_on(async {
+      let mut board = Board::new(19, 19);
+      let mut hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
+      hist.make_board_move(&mut board, PASS_LOC, Player::Black, None);
+      hist.make_board_move(&mut board, PASS_LOC, Player::White, None);
+      let mv = genmove(&ev, &board, &hist, Player::Black).await;
+      if hist.is_game_finished {
+        assert_eq!(mv, PASS_LOC, "game over: expected pass");
+      } else {
+        assert!(hist.is_legal(&board, mv, Player::Black), "wgpu returned illegal move {mv}");
+      }
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -358,8 +372,8 @@ mod tests {
       &mut spatial, &mut global,
     );
 
-    let cpu_out  = cpu_ev.run(&spatial, &global);
-    let wgpu_out = wgpu_ev.run(&spatial, &global);
+    let cpu_out  = pollster::block_on(cpu_ev.run(&spatial, &global));
+    let wgpu_out = pollster::block_on(wgpu_ev.run(&spatial, &global));
 
     // value head
     assert_eq!(cpu_out.value.len(), wgpu_out.value.len(), "value length mismatch");

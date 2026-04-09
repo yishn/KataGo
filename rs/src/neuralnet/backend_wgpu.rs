@@ -47,9 +47,7 @@
 /// SGF metadata encoder, nested bottleneck residual blocks, and model
 /// versions >= 15 (two-stage pass head) are all supported via the same
 /// sequence as the CPU backend.
-
-#[cfg(not(target_arch = "wasm32"))]
-use pollster::FutureExt as _;
+use futures_channel::oneshot;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -57,7 +55,7 @@ use crate::model::{
   Activation, BatchNormLayerDesc, BlockDesc, ConvLayerDesc, MatBiasLayerDesc,
   MatMulLayerDesc, ModelDesc,
 };
-use crate::neuralnet::backend::{Backend, EvalOutput};
+use crate::neuralnet::backend::{Backend, EvalOutput, RunFuture};
 
 // ============================================================================
 // Helpers
@@ -70,7 +68,11 @@ fn align_up(n: u64, align: u64) -> u64 {
 }
 
 /// Create a GPU buffer pre-filled with `data`.
-fn upload_f32(device: &wgpu::Device, label: &str, data: &[f32]) -> wgpu::Buffer {
+fn upload_f32(
+  device: &wgpu::Device,
+  label: &str,
+  data: &[f32],
+) -> wgpu::Buffer {
   device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
     label: Some(label),
     contents: bytemuck::cast_slice(data),
@@ -95,8 +97,8 @@ fn write_f32(queue: &wgpu::Queue, buf: &wgpu::Buffer, data: &[f32]) {
   queue.write_buffer(buf, 0, bytemuck::cast_slice(data));
 }
 
-/// Readback `count` f32 values from a GPU buffer (synchronous).
-fn readback_f32(
+/// Readback `count` f32 values from a GPU buffer (async; works on native and WASM).
+async fn readback_f32(
   device: &wgpu::Device,
   queue: &wgpu::Queue,
   src: &wgpu::Buffer,
@@ -110,20 +112,29 @@ fn readback_f32(
     mapped_at_creation: false,
   });
 
-  let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-    label: Some("readback_enc"),
-  });
+  let mut enc =
+    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+      label: Some("readback_enc"),
+    });
   enc.copy_buffer_to_buffer(src, 0, &staging, 0, size);
   queue.submit(std::iter::once(enc.finish()));
 
-  let slice = staging.slice(..);
-  let (tx, rx) = std::sync::mpsc::channel();
-  slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+  let (tx, rx) = oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
+  staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+    let _ = tx.send(r);
+  });
+  // On native we drive the event loop ourselves; on WASM the browser does it.
+  #[cfg(not(target_arch = "wasm32"))]
   device.poll(wgpu::Maintain::Wait);
-  rx.recv().expect("GPU map_async channel").expect("GPU map error");
+  rx.await
+    .expect("GPU map_async channel closed")
+    .expect("GPU map error");
 
-  let data = slice.get_mapped_range();
-  bytemuck::cast_slice(&data).to_vec()
+  let data = staging.slice(..).get_mapped_range();
+  let v = bytemuck::cast_slice(&data).to_vec();
+  drop(data);
+  staging.unmap();
+  v
 }
 
 /// Zero a GPU buffer via a fill pass.
@@ -153,7 +164,7 @@ struct ConvParams {
 struct BnParams {
   nhw: u32,
   nc: u32,
-  act: u32,  // 0=identity, 1=relu, 2=mish
+  act: u32, // 0=identity, 1=relu, 2=mish
   _pad: u32,
 }
 
@@ -510,7 +521,12 @@ struct GpuPipeline {
 }
 
 impl GpuPipeline {
-  fn new(device: &wgpu::Device, label: &str, src: &str, slots: &[BindSlot]) -> Self {
+  fn new(
+    device: &wgpu::Device,
+    label: &str,
+    src: &str,
+    slots: &[BindSlot],
+  ) -> Self {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
       label: Some(label),
       source: wgpu::ShaderSource::Wgsl(src.into()),
@@ -523,7 +539,7 @@ impl GpuPipeline {
         binding: i as u32,
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: match slot {
-          BindSlot::ReadOnly  => wgpu::BindingType::Buffer {
+          BindSlot::ReadOnly => wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Storage { read_only: true },
             has_dynamic_offset: false,
             min_binding_size: None,
@@ -533,7 +549,7 @@ impl GpuPipeline {
             has_dynamic_offset: false,
             min_binding_size: None,
           },
-          BindSlot::Uniform   => wgpu::BindingType::Buffer {
+          BindSlot::Uniform => wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
             min_binding_size: None,
@@ -543,10 +559,11 @@ impl GpuPipeline {
       })
       .collect();
 
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-      label: Some(&format!("{label}_bgl")),
-      entries: &entries,
-    });
+    let bgl =
+      device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(&format!("{label}_bgl")),
+        entries: &entries,
+      });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
       label: Some(&format!("{label}_pll")),
       bind_group_layouts: &[&bgl],
@@ -622,8 +639,15 @@ impl GpuConv {
     let ic = desc.in_channels as u32;
     let oc = desc.out_channels as u32;
     // Reorder from file layout [OC, IC, KY, KX] → same (already correct for direct).
-    let weight = upload_f32(device, &format!("{}_weight", desc.name), &desc.weights);
-    GpuConv { weight, ky, kx, ic, oc }
+    let weight =
+      upload_f32(device, &format!("{}_weight", desc.name), &desc.weights);
+    GpuConv {
+      weight,
+      ky,
+      kx,
+      ic,
+      oc,
+    }
   }
 }
 
@@ -635,15 +659,27 @@ struct GpuBn {
 }
 
 impl GpuBn {
-  fn new(device: &wgpu::Device, desc: &BatchNormLayerDesc, act: Activation) -> Self {
+  fn new(
+    device: &wgpu::Device,
+    desc: &BatchNormLayerDesc,
+    act: Activation,
+  ) -> Self {
     let act_code = match act {
       Activation::Identity => 0,
       Activation::Relu => 1,
       Activation::Mish | Activation::MishScale8 => 2,
     };
     GpuBn {
-      scale: upload_f32(device, &format!("{}_scale", desc.name), &desc.merged_scale),
-      bias: upload_f32(device, &format!("{}_bias", desc.name), &desc.merged_bias),
+      scale: upload_f32(
+        device,
+        &format!("{}_scale", desc.name),
+        &desc.merged_scale,
+      ),
+      bias: upload_f32(
+        device,
+        &format!("{}_bias", desc.name),
+        &desc.merged_bias,
+      ),
       nc: desc.num_channels as u32,
       act: act_code,
     }
@@ -683,7 +719,11 @@ struct GpuMatBias {
 impl GpuMatBias {
   fn new(device: &wgpu::Device, desc: &MatBiasLayerDesc) -> Self {
     GpuMatBias {
-      weight: upload_f32(device, &format!("{}_weight", desc.name), &desc.weights),
+      weight: upload_f32(
+        device,
+        &format!("{}_weight", desc.name),
+        &desc.weights,
+      ),
       nc: desc.num_channels as u32,
     }
   }
@@ -802,23 +842,53 @@ impl Pipelines {
       // SHADER_CONV:           inp(R), weight(R), out(RW), params(U)
       conv: GpuPipeline::new(device, "conv", SHADER_CONV, &[R, R, RW, U]),
       // SHADER_BATCHNORM_ACT:  inp(R), scale(R), bias(R), mask(R), out(RW), params(U)
-      bn: GpuPipeline::new(device, "bn_act", SHADER_BATCHNORM_ACT, &[R, R, R, R, RW, U]),
+      bn: GpuPipeline::new(
+        device,
+        "bn_act",
+        SHADER_BATCHNORM_ACT,
+        &[R, R, R, R, RW, U],
+      ),
       // SHADER_MATMUL:         inp(R), weight(R), out(RW), params(U)
       matmul: GpuPipeline::new(device, "matmul", SHADER_MATMUL, &[R, R, RW, U]),
       // SHADER_MATBIAS:        bias(R), mat(RW), params(U)
       matbias: GpuPipeline::new(device, "matbias", SHADER_MATBIAS, &[R, RW, U]),
       // SHADER_ADD_NC_BIAS:    bias(R), tensor(RW), params(U)
-      add_nc_bias: GpuPipeline::new(device, "add_nc_bias", SHADER_ADD_NC_BIAS, &[R, RW, U]),
+      add_nc_bias: GpuPipeline::new(
+        device,
+        "add_nc_bias",
+        SHADER_ADD_NC_BIAS,
+        &[R, RW, U],
+      ),
       // SHADER_GPOOL:          in4d(R), mask(R), msum(R), out(RW), params(U)
       gpool: GpuPipeline::new(device, "gpool", SHADER_GPOOL, &[R, R, R, RW, U]),
       // SHADER_VALUE_POOL:     in4d(R), msum(R), out(RW), params(U)
-      value_pool: GpuPipeline::new(device, "value_pool", SHADER_VALUE_POOL, &[R, R, RW, U]),
+      value_pool: GpuPipeline::new(
+        device,
+        "value_pool",
+        SHADER_VALUE_POOL,
+        &[R, R, RW, U],
+      ),
       // SHADER_MASK_SUM:       mask(R), msum(RW), params(U)
-      mask_sum: GpuPipeline::new(device, "mask_sum", SHADER_MASK_SUM, &[R, RW, U]),
+      mask_sum: GpuPipeline::new(
+        device,
+        "mask_sum",
+        SHADER_MASK_SUM,
+        &[R, RW, U],
+      ),
       // SHADER_EXTRACT_MASK:   inp(R), mask(RW), params(U)
-      extract_mask: GpuPipeline::new(device, "extract_mask", SHADER_EXTRACT_MASK, &[R, RW, U]),
+      extract_mask: GpuPipeline::new(
+        device,
+        "extract_mask",
+        SHADER_EXTRACT_MASK,
+        &[R, RW, U],
+      ),
       // SHADER_ACTIVATE_INPLACE: buf(RW), params(U)
-      activate_inplace: GpuPipeline::new(device, "activate_inplace", SHADER_ACTIVATE_INPLACE, &[RW, U]),
+      activate_inplace: GpuPipeline::new(
+        device,
+        "activate_inplace",
+        SHADER_ACTIVATE_INPLACE,
+        &[RW, U],
+      ),
     }
   }
 }
@@ -854,9 +924,13 @@ struct ModelMeta {
 impl WgpuBackend {
   /// Try to create a [`WgpuBackend`].  Returns `Err` if no suitable GPU adapter
   /// is available.
-  pub fn new(desc: &ModelDesc, nn_x: usize, nn_y: usize) -> Result<Self, String> {
+  pub async fn new(
+    desc: &ModelDesc,
+    nn_x: usize,
+    nn_y: usize,
+  ) -> Result<Self, String> {
     // Obtain a wgpu device.
-    let (device, queue) = Self::acquire_device()?;
+    let (device, queue) = Self::acquire_device().await?;
     let device = Arc::new(device);
     let queue = Arc::new(queue);
 
@@ -878,45 +952,175 @@ impl WgpuBackend {
       num_ownership_channels: desc.num_ownership_channels as usize,
     };
 
-    Ok(WgpuBackend { device, queue, pipes, trunk, policy_head, value_head, meta, nn_x, nn_y })
+    Ok(WgpuBackend {
+      device,
+      queue,
+      pipes,
+      trunk,
+      policy_head,
+      value_head,
+      meta,
+      nn_x,
+      nn_y,
+    })
   }
 
-  #[cfg(not(target_arch = "wasm32"))]
-  fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
-    async {
-      let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        ..Default::default()
-      });
-      let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-          power_preference: wgpu::PowerPreference::HighPerformance,
-          compatible_surface: None,
-          force_fallback_adapter: false,
-        })
-        .await
-        .ok_or_else(|| "no wgpu adapter found".to_string())?;
+  async fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+      backends: wgpu::Backends::all(),
+      ..Default::default()
+    });
+    let adapter = instance
+      .request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+      })
+      .await
+      .ok_or_else(|| "no wgpu adapter found".to_string())?;
 
-      let (device, queue) = adapter
-        .request_device(
-          &wgpu::DeviceDescriptor {
-            label: Some("katago_wgpu"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            memory_hints: Default::default(),
-          },
-          None, // no trace path
-        )
-        .await
-        .map_err(|e| format!("wgpu device request failed: {e}"))?;
-      Ok((device, queue))
+    let limits = wgpu::Limits::default();
+
+    let (device, queue) = adapter
+      .request_device(
+        &wgpu::DeviceDescriptor {
+          label: Some("katago_wgpu"),
+          required_features: wgpu::Features::empty(),
+          required_limits: limits,
+          memory_hints: Default::default(),
+        },
+        None, // no trace path
+      )
+      .await
+      .map_err(|e| format!("wgpu device request failed: {e}"))?;
+    Ok((device, queue))
+  }
+
+  /// Async forward pass — builds and submits the command buffer, then reads
+  /// back all five output tensors.
+  async fn run_internal(
+    &self,
+    spatial: &[f32],
+    global: &[f32],
+    meta: Option<&[f32]>,
+    nn_x: usize,
+    nn_y: usize,
+  ) -> EvalOutput {
+    let batch = 1u32;
+    let hw = (nn_x * nn_y) as u32;
+    let ic = self.meta.num_input_channels as u32;
+
+    // Upload inputs
+    let inp_buf = upload_f32(&self.device, "inp", spatial);
+    let inp_global_buf = upload_f32(&self.device, "inp_global", global);
+    let inp_meta_buf = meta.map(|m| upload_f32(&self.device, "inp_meta", m));
+
+    // Allocate mask + mask_sum buffers
+    let mask_buf = alloc_f32(&self.device, "mask", (batch * hw) as usize);
+    let msum_buf = alloc_f32(&self.device, "msum", batch as usize);
+
+    let ctx = ForwardCtx {
+      device: &self.device,
+      queue: &self.queue,
+      pipes: &self.pipes,
+      nn_x: nn_x as u32,
+      nn_y: nn_y as u32,
+      batch,
+    };
+
+    let mut enc =
+      self
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+          label: Some("forward_pass"),
+        });
+
+    // Extract mask from channel 0, compute mask_sum
+    ctx.extract_mask(&mut enc, &inp_buf, ic, &mask_buf);
+    ctx.mask_sum(&mut enc, &mask_buf, &msum_buf);
+
+    // Trunk
+    let trunk_out = ctx.run_trunk(
+      &mut enc,
+      &inp_buf,
+      &inp_global_buf,
+      inp_meta_buf.as_ref(),
+      &self.trunk,
+      &mask_buf,
+      &msum_buf,
+    );
+
+    // Policy head
+    let (pp_buf, ps_buf) = ctx.run_policy_head(
+      &mut enc,
+      &trunk_out,
+      &self.policy_head,
+      &mask_buf,
+      &msum_buf,
+    );
+
+    // Value head
+    let (val_buf, sv_buf, own_buf) = ctx.run_value_head(
+      &mut enc,
+      &trunk_out,
+      &self.value_head,
+      &mask_buf,
+      &msum_buf,
+    );
+
+    // Submit the entire forward pass as a single command buffer.
+    self.queue.submit(std::iter::once(enc.finish()));
+
+    // Async readbacks — each call submits a staging copy and awaits the map.
+    let policy_pass = readback_f32(
+      &self.device,
+      &self.queue,
+      &pp_buf,
+      self.meta.num_policy_channels,
+    )
+    .await;
+    let policy_spatial = readback_f32(
+      &self.device,
+      &self.queue,
+      &ps_buf,
+      nn_x * nn_y * self.meta.num_policy_channels,
+    )
+    .await;
+    let value = readback_f32(
+      &self.device,
+      &self.queue,
+      &val_buf,
+      self.meta.num_value_channels,
+    )
+    .await;
+    let score_value = readback_f32(
+      &self.device,
+      &self.queue,
+      &sv_buf,
+      self.meta.num_score_value_channels,
+    )
+    .await;
+    let ownership = readback_f32(
+      &self.device,
+      &self.queue,
+      &own_buf,
+      nn_x * nn_y * self.meta.num_ownership_channels,
+    )
+    .await;
+
+    EvalOutput {
+      policy_pass,
+      policy_spatial,
+      value,
+      score_value,
+      ownership,
+      nn_x,
+      nn_y,
+      policy_ch: self.meta.num_policy_channels,
+      value_ch: self.meta.num_value_channels,
+      score_ch: self.meta.num_score_value_channels,
+      ownership_ch: self.meta.num_ownership_channels,
     }
-    .block_on()
-  }
-
-  #[cfg(target_arch = "wasm32")]
-  fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
-    Err("wasm32 requires async device acquisition".into())
   }
 }
 
@@ -952,17 +1156,38 @@ fn build_blocks(
     .iter()
     .map(|bd| match bd {
       BlockDesc::Ordinary(d) => GpuBlock::Ordinary(GpuResBlock {
-        nac1: build_nac(device, &d.pre_bn, d.pre_activation.activation, &d.regular_conv),
-        nac2: build_nac(device, &d.mid_bn, d.mid_activation.activation, &d.final_conv),
+        nac1: build_nac(
+          device,
+          &d.pre_bn,
+          d.pre_activation.activation,
+          &d.regular_conv,
+        ),
+        nac2: build_nac(
+          device,
+          &d.mid_bn,
+          d.mid_activation.activation,
+          &d.final_conv,
+        ),
       }),
-      BlockDesc::GlobalPooling(d) => GpuBlock::GlobalPooling(GpuGpoolResBlock {
-        pre_bn: GpuBn::new(device, &d.pre_bn, d.pre_activation.activation),
-        regular_conv: GpuConv::new(device, &d.regular_conv),
-        gpool_conv: GpuConv::new(device, &d.gpool_conv),
-        gpool_bn: GpuBn::new(device, &d.gpool_bn, d.gpool_activation.activation),
-        gpool_to_bias_mul: GpuMatMul::new(device, &d.gpool_to_bias_mul),
-        nac2: build_nac(device, &d.mid_bn, d.mid_activation.activation, &d.final_conv),
-      }),
+      BlockDesc::GlobalPooling(d) => {
+        GpuBlock::GlobalPooling(GpuGpoolResBlock {
+          pre_bn: GpuBn::new(device, &d.pre_bn, d.pre_activation.activation),
+          regular_conv: GpuConv::new(device, &d.regular_conv),
+          gpool_conv: GpuConv::new(device, &d.gpool_conv),
+          gpool_bn: GpuBn::new(
+            device,
+            &d.gpool_bn,
+            d.gpool_activation.activation,
+          ),
+          gpool_to_bias_mul: GpuMatMul::new(device, &d.gpool_to_bias_mul),
+          nac2: build_nac(
+            device,
+            &d.mid_bn,
+            d.mid_activation.activation,
+            &d.final_conv,
+          ),
+        })
+      }
       BlockDesc::NestedBottleneck(d) => {
         GpuBlock::NestedBottleneck(GpuNestedBottleneck {
           nac1: build_nac(
@@ -988,15 +1213,16 @@ fn build_trunk(
   device: &wgpu::Device,
   desc: &crate::model::TrunkDesc,
 ) -> GpuTrunk {
-  let sgf_meta_encoder = desc.sgf_metadata_encoder.as_ref().map(|e| GpuSgfEncoder {
-    mul1: GpuMatMul::new(device, &e.mul1),
-    bias1: GpuMatBias::new(device, &e.bias1),
-    act1: act_code(e.act1.activation),
-    mul2: GpuMatMul::new(device, &e.mul2),
-    bias2: GpuMatBias::new(device, &e.bias2),
-    act2: act_code(e.act2.activation),
-    mul3: GpuMatMul::new(device, &e.mul3),
-  });
+  let sgf_meta_encoder =
+    desc.sgf_metadata_encoder.as_ref().map(|e| GpuSgfEncoder {
+      mul1: GpuMatMul::new(device, &e.mul1),
+      bias1: GpuMatBias::new(device, &e.bias1),
+      act1: act_code(e.act1.activation),
+      mul2: GpuMatMul::new(device, &e.mul2),
+      bias2: GpuMatBias::new(device, &e.bias2),
+      act2: act_code(e.act2.activation),
+      mul3: GpuMatMul::new(device, &e.mul3),
+    });
   GpuTrunk {
     initial_conv: GpuConv::new(device, &desc.initial_conv),
     initial_mat_mul: GpuMatMul::new(device, &desc.initial_mat_mul),
@@ -1028,13 +1254,19 @@ fn build_policy_head(
     p1_bn: GpuBn::new(device, &desc.p1_bn, desc.p1_activation.activation),
     p2_conv: GpuConv::new(device, &desc.p2_conv),
     gpool_to_pass_mul: GpuMatMul::new(device, &desc.gpool_to_pass_mul),
-    gpool_to_pass_bias: desc.gpool_to_pass_bias.as_ref().map(|b| GpuMatBias::new(device, b)),
+    gpool_to_pass_bias: desc
+      .gpool_to_pass_bias
+      .as_ref()
+      .map(|b| GpuMatBias::new(device, b)),
     pass_activation: desc
       .pass_activation
       .as_ref()
       .map(|a| act_code(a.activation))
       .unwrap_or(0),
-    gpool_to_pass_mul2: desc.gpool_to_pass_mul2.as_ref().map(|m| GpuMatMul::new(device, m)),
+    gpool_to_pass_mul2: desc
+      .gpool_to_pass_mul2
+      .as_ref()
+      .map(|m| GpuMatMul::new(device, m)),
     p1c,
     g1c,
     p2c,
@@ -1080,7 +1312,9 @@ struct ForwardCtx<'a> {
 }
 
 impl<'a> ForwardCtx<'a> {
-  fn hw(&self) -> u32 { self.nn_x * self.nn_y }
+  fn hw(&self) -> u32 {
+    self.nn_x * self.nn_y
+  }
 
   // ------------------------------------------------------------------
   // Primitive operations
@@ -1106,7 +1340,12 @@ impl<'a> ForwardCtx<'a> {
     };
     let pu = upload_uniform(self.device, &params);
     let total = self.batch * self.hw() * gc.oc;
-    self.pipes.conv.dispatch(enc, self.device, &[inp, &gc.weight, out, &pu], total);
+    self.pipes.conv.dispatch(
+      enc,
+      self.device,
+      &[inp, &gc.weight, out, &pu],
+      total,
+    );
   }
 
   fn bn_act(
@@ -1117,10 +1356,20 @@ impl<'a> ForwardCtx<'a> {
     mask: &wgpu::Buffer,
     out: &wgpu::Buffer,
   ) {
-    let params = BnParams { nhw: self.batch * self.hw(), nc: gbn.nc, act: gbn.act, _pad: 0 };
+    let params = BnParams {
+      nhw: self.batch * self.hw(),
+      nc: gbn.nc,
+      act: gbn.act,
+      _pad: 0,
+    };
     let pu = upload_uniform(self.device, &params);
     let total = self.batch * self.hw() * gbn.nc;
-    self.pipes.bn.dispatch(enc, self.device, &[inp, &gbn.scale, &gbn.bias, mask, out, &pu], total);
+    self.pipes.bn.dispatch(
+      enc,
+      self.device,
+      &[inp, &gbn.scale, &gbn.bias, mask, out, &pu],
+      total,
+    );
   }
 
   fn matmul(
@@ -1130,10 +1379,20 @@ impl<'a> ForwardCtx<'a> {
     gmm: &GpuMatMul,
     out: &wgpu::Buffer,
   ) {
-    let params = MatmulParams { ic: gmm.ic, oc: gmm.oc, batch: self.batch, _pad: 0 };
+    let params = MatmulParams {
+      ic: gmm.ic,
+      oc: gmm.oc,
+      batch: self.batch,
+      _pad: 0,
+    };
     let pu = upload_uniform(self.device, &params);
     let total = gmm.oc * self.batch;
-    self.pipes.matmul.dispatch(enc, self.device, &[inp, &gmm.weight, out, &pu], total);
+    self.pipes.matmul.dispatch(
+      enc,
+      self.device,
+      &[inp, &gmm.weight, out, &pu],
+      total,
+    );
   }
 
   fn matbias(
@@ -1142,10 +1401,20 @@ impl<'a> ForwardCtx<'a> {
     gmb: &GpuMatBias,
     mat: &wgpu::Buffer,
   ) {
-    let params = MatbiasParams { nc: gmb.nc, batch: self.batch, _pad0: 0, _pad1: 0 };
+    let params = MatbiasParams {
+      nc: gmb.nc,
+      batch: self.batch,
+      _pad0: 0,
+      _pad1: 0,
+    };
     let pu = upload_uniform(self.device, &params);
     let total = gmb.nc * self.batch;
-    self.pipes.matbias.dispatch(enc, self.device, &[&gmb.weight, mat, &pu], total);
+    self.pipes.matbias.dispatch(
+      enc,
+      self.device,
+      &[&gmb.weight, mat, &pu],
+      total,
+    );
   }
 
   fn add_nc_bias(
@@ -1155,11 +1424,20 @@ impl<'a> ForwardCtx<'a> {
     tensor: &wgpu::Buffer,
     nc: u32,
   ) {
-    let params =
-      AddNcBiasParams { h: self.nn_y, w: self.nn_x, nc, batch: self.batch };
+    let params = AddNcBiasParams {
+      h: self.nn_y,
+      w: self.nn_x,
+      nc,
+      batch: self.batch,
+    };
     let pu = upload_uniform(self.device, &params);
     let total = self.batch * self.hw() * nc;
-    self.pipes.add_nc_bias.dispatch(enc, self.device, &[bias, tensor, &pu], total);
+    self.pipes.add_nc_bias.dispatch(
+      enc,
+      self.device,
+      &[bias, tensor, &pu],
+      total,
+    );
   }
 
   fn gpool(
@@ -1171,10 +1449,20 @@ impl<'a> ForwardCtx<'a> {
     msum: &wgpu::Buffer,
     out: &wgpu::Buffer,
   ) {
-    let params = GpoolParams { batch: self.batch, h: self.nn_y, w: self.nn_x, c_in };
+    let params = GpoolParams {
+      batch: self.batch,
+      h: self.nn_y,
+      w: self.nn_x,
+      c_in,
+    };
     let pu = upload_uniform(self.device, &params);
     let total = self.batch * c_in;
-    self.pipes.gpool.dispatch(enc, self.device, &[in4d, mask, msum, out, &pu], total);
+    self.pipes.gpool.dispatch(
+      enc,
+      self.device,
+      &[in4d, mask, msum, out, &pu],
+      total,
+    );
   }
 
   fn value_pool(
@@ -1185,10 +1473,20 @@ impl<'a> ForwardCtx<'a> {
     msum: &wgpu::Buffer,
     out: &wgpu::Buffer,
   ) {
-    let params = GpoolParams { batch: self.batch, h: self.nn_y, w: self.nn_x, c_in };
+    let params = GpoolParams {
+      batch: self.batch,
+      h: self.nn_y,
+      w: self.nn_x,
+      c_in,
+    };
     let pu = upload_uniform(self.device, &params);
     let total = self.batch * c_in;
-    self.pipes.value_pool.dispatch(enc, self.device, &[in4d, msum, out, &pu], total);
+    self.pipes.value_pool.dispatch(
+      enc,
+      self.device,
+      &[in4d, msum, out, &pu],
+      total,
+    );
   }
 
   fn mask_sum(
@@ -1197,9 +1495,19 @@ impl<'a> ForwardCtx<'a> {
     mask: &wgpu::Buffer,
     msum: &wgpu::Buffer,
   ) {
-    let params = MaskSumParams { batch: self.batch, hw: self.hw(), _pad0: 0, _pad1: 0 };
+    let params = MaskSumParams {
+      batch: self.batch,
+      hw: self.hw(),
+      _pad0: 0,
+      _pad1: 0,
+    };
     let pu = upload_uniform(self.device, &params);
-    self.pipes.mask_sum.dispatch(enc, self.device, &[mask, msum, &pu], self.batch);
+    self.pipes.mask_sum.dispatch(
+      enc,
+      self.device,
+      &[mask, msum, &pu],
+      self.batch,
+    );
   }
 
   fn extract_mask(
@@ -1210,12 +1518,23 @@ impl<'a> ForwardCtx<'a> {
     mask: &wgpu::Buffer,
   ) {
     let params = ConvParams {
-      n: self.batch, h: self.nn_y, w: self.nn_x,
-      ic, oc: 0, ky: 0, kx: 0, accumulate: 0,
+      n: self.batch,
+      h: self.nn_y,
+      w: self.nn_x,
+      ic,
+      oc: 0,
+      ky: 0,
+      kx: 0,
+      accumulate: 0,
     };
     let pu = upload_uniform(self.device, &params);
     let total = self.batch * self.hw();
-    self.pipes.extract_mask.dispatch(enc, self.device, &[inp, mask, &pu], total);
+    self.pipes.extract_mask.dispatch(
+      enc,
+      self.device,
+      &[inp, mask, &pu],
+      total,
+    );
   }
 
   fn activate_inplace(
@@ -1227,10 +1546,23 @@ impl<'a> ForwardCtx<'a> {
   ) {
     #[repr(C)]
     #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-    struct ActParams { n: u32, act: u32, _p0: u32, _p1: u32 }
-    let params = ActParams { n, act, _p0: 0, _p1: 0 };
+    struct ActParams {
+      n: u32,
+      act: u32,
+      _p0: u32,
+      _p1: u32,
+    }
+    let params = ActParams {
+      n,
+      act,
+      _p0: 0,
+      _p1: 0,
+    };
     let pu = upload_uniform(self.device, &params);
-    self.pipes.activate_inplace.dispatch(enc, self.device, &[buf, &pu], n);
+    self
+      .pipes
+      .activate_inplace
+      .dispatch(enc, self.device, &[buf, &pu], n);
   }
 
   // ------------------------------------------------------------------
@@ -1247,7 +1579,8 @@ impl<'a> ForwardCtx<'a> {
     accumulate: bool,
   ) {
     let hw = self.batch * self.hw();
-    let scratch = alloc_f32(self.device, "nac_scratch", (hw * gnac.bn.nc) as usize);
+    let scratch =
+      alloc_f32(self.device, "nac_scratch", (hw * gnac.bn.nc) as usize);
     self.bn_act(enc, inp, &gnac.bn, mask, &scratch);
     self.conv(enc, &scratch, &gnac.conv, out, accumulate);
   }
@@ -1280,13 +1613,19 @@ impl<'a> ForwardCtx<'a> {
     let reg_c = block.regular_conv.oc;
     let gpc = block.gpool_conv.oc;
 
-    let trunk_scratch =
-      alloc_f32(self.device, "gpool_trunk_scratch", (hw * block.pre_bn.nc) as usize);
-    let reg_out = alloc_f32(self.device, "gpool_reg_out", (hw * reg_c) as usize);
+    let trunk_scratch = alloc_f32(
+      self.device,
+      "gpool_trunk_scratch",
+      (hw * block.pre_bn.nc) as usize,
+    );
+    let reg_out =
+      alloc_f32(self.device, "gpool_reg_out", (hw * reg_c) as usize);
     let gp_out = alloc_f32(self.device, "gpool_gp_out", (hw * gpc) as usize);
     let gp_out2 = alloc_f32(self.device, "gpool_gp_out2", (hw * gpc) as usize);
-    let gp_concat = alloc_f32(self.device, "gpool_concat", (gpc * 3 * self.batch) as usize);
-    let gp_bias = alloc_f32(self.device, "gpool_bias", (reg_c * self.batch) as usize);
+    let gp_concat =
+      alloc_f32(self.device, "gpool_concat", (gpc * 3 * self.batch) as usize);
+    let gp_bias =
+      alloc_f32(self.device, "gpool_bias", (reg_c * self.batch) as usize);
 
     self.bn_act(enc, trunk, &block.pre_bn, mask, &trunk_scratch);
     self.conv(enc, &trunk_scratch, &block.regular_conv, &reg_out, false);
@@ -1363,12 +1702,17 @@ impl<'a> ForwardCtx<'a> {
     self.add_nc_bias(enc, &mat_out, &trunk_buf, tc);
 
     // optional SGF metadata encoder
-    if let (Some(enc_ref), Some(meta_buf)) = (&trunk.sgf_meta_encoder, inp_meta) {
+    if let (Some(enc_ref), Some(meta_buf)) = (&trunk.sgf_meta_encoder, inp_meta)
+    {
       let c1 = enc_ref.mul1.oc;
       let c2 = enc_ref.mul2.oc;
       let buf1 = alloc_f32(self.device, "sgf_buf1", (c1 * self.batch) as usize);
       let buf2 = alloc_f32(self.device, "sgf_buf2", (c2 * self.batch) as usize);
-      let meta_out = alloc_f32(self.device, "sgf_out", (enc_ref.mul3.oc * self.batch) as usize);
+      let meta_out = alloc_f32(
+        self.device,
+        "sgf_out",
+        (enc_ref.mul3.oc * self.batch) as usize,
+      );
       self.matmul(enc, meta_buf, &enc_ref.mul1, &buf1);
       self.matbias(enc, &enc_ref.bias1, &buf1);
       self.activate_inplace(enc, &buf1, c1 * self.batch, enc_ref.act1);
@@ -1404,11 +1748,15 @@ impl<'a> ForwardCtx<'a> {
     let p1_out = alloc_f32(self.device, "p1_out", (hw * p1c) as usize);
     let g1_out = alloc_f32(self.device, "g1_out", (hw * g1c) as usize);
     let g1_out2 = alloc_f32(self.device, "g1_out2", (hw * g1c) as usize);
-    let g1_concat = alloc_f32(self.device, "g1_concat", (g1c * 3 * self.batch) as usize);
-    let g1_bias = alloc_f32(self.device, "g1_bias", (p1c * self.batch) as usize);
+    let g1_concat =
+      alloc_f32(self.device, "g1_concat", (g1c * 3 * self.batch) as usize);
+    let g1_bias =
+      alloc_f32(self.device, "g1_bias", (p1c * self.batch) as usize);
     let p1_out2 = alloc_f32(self.device, "p1_out2", (hw * p1c) as usize);
-    let policy_spatial = alloc_f32(self.device, "policy_spatial", (hw * p2c) as usize);
-    let policy_pass = alloc_f32(self.device, "policy_pass", (p2c * self.batch) as usize);
+    let policy_spatial =
+      alloc_f32(self.device, "policy_spatial", (hw * p2c) as usize);
+    let policy_pass =
+      alloc_f32(self.device, "policy_pass", (p2c * self.batch) as usize);
 
     self.conv(enc, trunk_out, &ph.p1_conv, &p1_out, false);
     self.conv(enc, trunk_out, &ph.g1_conv, &g1_out, false);
@@ -1420,13 +1768,19 @@ impl<'a> ForwardCtx<'a> {
     self.conv(enc, &p1_out2, &ph.p2_conv, &policy_spatial, false);
 
     if ph.model_version >= 15 {
-      let pass_tmp = alloc_f32(self.device, "pass_tmp", (p1c * self.batch) as usize);
+      let pass_tmp =
+        alloc_f32(self.device, "pass_tmp", (p1c * self.batch) as usize);
       self.matmul(enc, &g1_concat, &ph.gpool_to_pass_mul, &pass_tmp);
       if let Some(b) = &ph.gpool_to_pass_bias {
         self.matbias(enc, b, &pass_tmp);
       }
       if ph.pass_activation != 0 {
-        self.activate_inplace(enc, &pass_tmp, p1c * self.batch, ph.pass_activation);
+        self.activate_inplace(
+          enc,
+          &pass_tmp,
+          p1c * self.batch,
+          ph.pass_activation,
+        );
       }
       if let Some(m) = &ph.gpool_to_pass_mul2 {
         self.matmul(enc, &pass_tmp, m, &policy_pass);
@@ -1455,10 +1809,12 @@ impl<'a> ForwardCtx<'a> {
 
     let v1_out = alloc_f32(self.device, "v1_out", (hw * v1c) as usize);
     let v1_out2 = alloc_f32(self.device, "v1_out2", (hw * v1c) as usize);
-    let v1_mean = alloc_f32(self.device, "v1_mean", (v1c * 3 * self.batch) as usize);
+    let v1_mean =
+      alloc_f32(self.device, "v1_mean", (v1c * 3 * self.batch) as usize);
     let v2_out = alloc_f32(self.device, "v2_out", (v2c * self.batch) as usize);
     let value = alloc_f32(self.device, "value", (v3c * self.batch) as usize);
-    let score_value = alloc_f32(self.device, "score_value", (sv3c * self.batch) as usize);
+    let score_value =
+      alloc_f32(self.device, "score_value", (sv3c * self.batch) as usize);
     let ownership = alloc_f32(self.device, "ownership", (hw * owc) as usize);
 
     self.conv(enc, trunk_out, &vh.v1_conv, &v1_out, false);
@@ -1481,7 +1837,10 @@ impl<'a> ForwardCtx<'a> {
 // Uniform buffer helper (bypasses upload_f32 for typed structs)
 // ============================================================================
 
-fn upload_uniform<T: bytemuck::Pod>(device: &wgpu::Device, data: &T) -> wgpu::Buffer {
+fn upload_uniform<T: bytemuck::Pod>(
+  device: &wgpu::Device,
+  data: &T,
+) -> wgpu::Buffer {
   device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
     label: Some("uniform"),
     contents: bytemuck::bytes_of(data),
@@ -1494,116 +1853,39 @@ fn upload_uniform<T: bytemuck::Pod>(device: &wgpu::Device, data: &T) -> wgpu::Bu
 // ============================================================================
 
 impl Backend for WgpuBackend {
-  fn run(
-    &self,
-    spatial: &[f32],
-    global: &[f32],
-    meta: Option<&[f32]>,
+  fn run<'a>(
+    &'a self,
+    spatial: &'a [f32],
+    global: &'a [f32],
+    meta: Option<&'a [f32]>,
     nn_x: usize,
     nn_y: usize,
-  ) -> EvalOutput {
-    let batch = 1u32;
-    let hw = (nn_x * nn_y) as u32;
-    let ic = self.meta.num_input_channels as u32;
-
-    // Upload inputs
-    let inp_buf = upload_f32(&self.device, "inp", spatial);
-
-    // Global layout for matmul: [C * N] = [C] for batch=1
-    let inp_global_buf = upload_f32(&self.device, "inp_global", global);
-    let inp_meta_buf = meta.map(|m| upload_f32(&self.device, "inp_meta", m));
-
-    // Allocate mask + mask_sum buffers
-    let mask_buf = alloc_f32(&self.device, "mask", (batch * hw) as usize);
-    let msum_buf = alloc_f32(&self.device, "msum", batch as usize);
-
-    let ctx = ForwardCtx {
-      device: &self.device,
-      queue: &self.queue,
-      pipes: &self.pipes,
-      nn_x: nn_x as u32,
-      nn_y: nn_y as u32,
-      batch,
-    };
-
-    let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-      label: Some("forward_pass"),
-    });
-
-    // Extract mask from channel 0, compute mask_sum
-    ctx.extract_mask(&mut enc, &inp_buf, ic, &mask_buf);
-    ctx.mask_sum(&mut enc, &mask_buf, &msum_buf);
-
-    // Trunk
-    let trunk_out = ctx.run_trunk(
-      &mut enc,
-      &inp_buf,
-      &inp_global_buf,
-      inp_meta_buf.as_ref(),
-      &self.trunk,
-      &mask_buf,
-      &msum_buf,
-    );
-
-    // Policy head
-    let (pp_buf, ps_buf) = ctx.run_policy_head(
-      &mut enc,
-      &trunk_out,
-      &self.policy_head,
-      &mask_buf,
-      &msum_buf,
-    );
-
-    // Value head
-    let (val_buf, sv_buf, own_buf) =
-      ctx.run_value_head(&mut enc, &trunk_out, &self.value_head, &mask_buf, &msum_buf);
-
-    self.queue.submit(std::iter::once(enc.finish()));
-    self.device.poll(wgpu::Maintain::Wait);
-
-    // Readback
-    let policy_pass = readback_f32(
-      &self.device, &self.queue, &pp_buf,
-      self.meta.num_policy_channels,
-    );
-    let policy_spatial = readback_f32(
-      &self.device, &self.queue, &ps_buf,
-      nn_x * nn_y * self.meta.num_policy_channels,
-    );
-    let value = readback_f32(
-      &self.device, &self.queue, &val_buf,
-      self.meta.num_value_channels,
-    );
-    let score_value = readback_f32(
-      &self.device, &self.queue, &sv_buf,
-      self.meta.num_score_value_channels,
-    );
-    let ownership = readback_f32(
-      &self.device, &self.queue, &own_buf,
-      nn_x * nn_y * self.meta.num_ownership_channels,
-    );
-
-    EvalOutput {
-      policy_pass,
-      policy_spatial,
-      value,
-      score_value,
-      ownership,
-      nn_x,
-      nn_y,
-      policy_ch: self.meta.num_policy_channels,
-      value_ch: self.meta.num_value_channels,
-      score_ch: self.meta.num_score_value_channels,
-      ownership_ch: self.meta.num_ownership_channels,
-    }
+  ) -> RunFuture<'a> {
+    Box::pin(self.run_internal(spatial, global, meta, nn_x, nn_y))
   }
 
-  fn model_version(&self) -> i32 { self.meta.model_version }
-  fn num_input_channels(&self) -> usize { self.meta.num_input_channels }
-  fn num_input_global_channels(&self) -> usize { self.meta.num_input_global_channels }
-  fn num_input_meta_channels(&self) -> usize { self.meta.num_input_meta_channels }
-  fn num_policy_channels(&self) -> usize { self.meta.num_policy_channels }
-  fn num_value_channels(&self) -> usize { self.meta.num_value_channels }
-  fn num_score_value_channels(&self) -> usize { self.meta.num_score_value_channels }
-  fn num_ownership_channels(&self) -> usize { self.meta.num_ownership_channels }
+  fn model_version(&self) -> i32 {
+    self.meta.model_version
+  }
+  fn num_input_channels(&self) -> usize {
+    self.meta.num_input_channels
+  }
+  fn num_input_global_channels(&self) -> usize {
+    self.meta.num_input_global_channels
+  }
+  fn num_input_meta_channels(&self) -> usize {
+    self.meta.num_input_meta_channels
+  }
+  fn num_policy_channels(&self) -> usize {
+    self.meta.num_policy_channels
+  }
+  fn num_value_channels(&self) -> usize {
+    self.meta.num_value_channels
+  }
+  fn num_score_value_channels(&self) -> usize {
+    self.meta.num_score_value_channels
+  }
+  fn num_ownership_channels(&self) -> usize {
+    self.meta.num_ownership_channels
+  }
 }

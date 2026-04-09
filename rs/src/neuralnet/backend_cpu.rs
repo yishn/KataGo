@@ -5,7 +5,7 @@
 /// previously embedded directly in [`super::eval::Evaluator`].
 
 use crate::model::ModelDesc;
-use crate::neuralnet::backend::{Backend, EvalOutput};
+use crate::neuralnet::backend::{Backend, EvalOutput, RunFuture};
 use crate::neuralnet::layers::Model;
 
 // ---------------------------------------------------------------------------
@@ -25,18 +25,18 @@ impl CpuBackend {
 }
 
 impl Backend for CpuBackend {
-  fn run(
-    &self,
-    spatial: &[f32],
-    global: &[f32],
-    meta: Option<&[f32]>,
+  fn run<'a>(
+    &'a self,
+    spatial: &'a [f32],
+    global: &'a [f32],
+    meta: Option<&'a [f32]>,
     nn_x: usize,
     nn_y: usize,
-  ) -> EvalOutput {
+  ) -> RunFuture<'a> {
     let (policy_pass, policy_spatial, value, score_value, ownership) =
       self.model.apply(spatial, global, meta, 1, nn_x, nn_y);
 
-    EvalOutput {
+    let result = EvalOutput {
       policy_pass,
       policy_spatial,
       value,
@@ -48,7 +48,8 @@ impl Backend for CpuBackend {
       value_ch: self.model.num_value_channels,
       score_ch: self.model.num_score_value_channels,
       ownership_ch: self.model.num_ownership_channels,
-    }
+    };
+    Box::pin(std::future::ready(result))
   }
 
   fn model_version(&self) -> i32 { self.model.model_version }

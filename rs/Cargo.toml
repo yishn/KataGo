@@ -5,10 +5,13 @@ edition = "2024"
 
 [dependencies]
 flate2 = "1"
-wgpu = { version = "24", default-features = false, features = ["wgsl"] }
+wgpu = { version = "24", default-features = false, features = ["wgsl", "webgpu"] }
 bytemuck = { version = "1", features = ["derive"] }
+getrandom = { version = "0.2", features = ["js"] }
 rand = "0.8"
 rand_distr = "0.4"
+# Oneshot channel for async GPU readback — works on both native and WASM.
+futures-channel = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
