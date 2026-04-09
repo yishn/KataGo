@@ -1,13 +1,18 @@
-/// CPU-based neural network evaluator for KataGo.
+/// Neural network evaluator with pluggable backend support.
 ///
-/// A pure-Rust, WASM-compatible translation of `cpp/neuralnet/eigenbackend.cpp`.
-/// Uses float32 arithmetic in NHWC memory layout (matching the Eigen backend).
+/// Backends available:
+/// * [`backend_cpu`] — pure-Rust CPU backend (always available, WASM-compatible)
+/// * [`backend_wgpu`] — WebGPU backend via the `wgpu` crate (non-WASM)
 ///
 /// Layout conventions (matching C++ Eigen backend NHWC):
 ///   4-D tensors: [C, X, Y, N] in column-major == [N][Y][X][C] row-major.
 ///   In Rust we store data flat in `[N * H * W * C]` row-major order so that
 ///   index `(n, y, x, c)` → `n*H*W*C + y*W*C + x*C + c`.
 
+pub mod backend;
+pub mod backend_cpu;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod backend_wgpu;
 pub mod eval;
 pub mod genmove;
 pub mod layers;

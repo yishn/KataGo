@@ -1,57 +1,22 @@
-/// CPU evaluator — the public interface consumed by the search engine.
+/// Backend-agnostic neural network evaluator.
 ///
-/// Mirrors the role of `NeuralNet::getOutput` in eigenbackend.cpp, but
-/// adapted to the pure-Rust, WASM-compatible layer stack in `layers.rs`.
+/// [`Evaluator`] wraps a `Box<dyn Backend>` and exposes the same public API
+/// as before.  The concrete backend (CPU or WebGPU) is chosen at construction
+/// time via [`BackendKind`].
 ///
-/// The [`Evaluator`] wraps a [`layers::Model`] and exposes a single
-/// [`Evaluator::run`] method that takes NHWC spatial features and global
-/// features for a **single board position** (batch size 1) and returns an
-/// [`EvalOutput`] containing raw network logits.
+/// ```ignore
+/// // CPU backend (default, backward-compatible)
+/// let ev = Evaluator::new(&desc, 19, 19);
 ///
-/// All data is kept on the heap as `Vec<f32>` so no GPU/WASM barriers apply.
+/// // WebGPU backend (falls back to CPU if no GPU adapter is found)
+/// let ev = Evaluator::with_backend(&desc, 19, 19, BackendKind::Wgpu);
+/// ```
 
 use crate::model::ModelDesc;
-use crate::neuralnet::layers::Model;
+use crate::neuralnet::backend::{self, BackendKind};
 
-// ---------------------------------------------------------------------------
-// EvalOutput
-// ---------------------------------------------------------------------------
-
-/// Raw per-position outputs from the neural network (logits, not probabilities).
-///
-/// Layout notes (batch size 1; all Vecs have length == the relevant channel
-/// count *except* `policy_spatial` which is `H * W * policy_ch`):
-///
-/// | field           | length                         | layout              |
-/// |-----------------|-------------------------------|---------------------|
-/// | `policy_pass`   | `policy_ch`                   | `[ch]`              |
-/// | `policy_spatial`| `H * W * policy_ch`           | NHWC `[hw * ch]`    |
-/// | `value`         | `value_ch`                    | `[ch]`              |
-/// | `score_value`   | `score_ch`                    | `[ch]`              |
-/// | `ownership`     | `H * W * ownership_ch`        | NHWC `[hw * ch]`    |
-///
-/// (All lengths are for a single batch element, i.e. N=1.)
-#[derive(Debug, Clone)]
-pub struct EvalOutput {
-  /// Policy logits for the pass move: `[policy_ch]`.
-  pub policy_pass: Vec<f32>,
-  /// Policy logits for board positions: NHWC `[hw * policy_ch]`.
-  pub policy_spatial: Vec<f32>,
-  /// Win/loss/noResult logits: `[value_ch]` (typically 3).
-  pub value: Vec<f32>,
-  /// Score distribution logits: `[score_ch]` (typically 6).
-  pub score_value: Vec<f32>,
-  /// Ownership map logits: `[hw * ownership_ch]` (typically 1 channel).
-  pub ownership: Vec<f32>,
-
-  // Metadata (useful for the search layer)
-  pub nn_x: usize,
-  pub nn_y: usize,
-  pub policy_ch: usize,
-  pub value_ch: usize,
-  pub score_ch: usize,
-  pub ownership_ch: usize,
-}
+// Re-export EvalOutput from the backend module so existing import paths keep working.
+pub use crate::neuralnet::backend::EvalOutput;
 
 // ---------------------------------------------------------------------------
 // Evaluator
@@ -59,10 +24,9 @@ pub struct EvalOutput {
 
 /// A loaded, inference-ready neural network.
 ///
-/// Create from a parsed [`ModelDesc`] via [`Evaluator::new`], then call
-/// [`Evaluator::run`] for each position to evaluate.
+/// Create via [`Evaluator::new`] (CPU) or [`Evaluator::with_backend`] (explicit).
 pub struct Evaluator {
-  model: Model,
+  backend: Box<dyn backend::Backend>,
   pub nn_x: usize,
   pub nn_y: usize,
   pub model_version: i32,
@@ -75,77 +39,60 @@ pub struct Evaluator {
 }
 
 impl Evaluator {
-  /// Build an evaluator from a parsed model descriptor.
-  ///
-  /// `nn_x` / `nn_y` are the board dimensions (e.g. 19 × 19).
+  /// Build a CPU-backed evaluator (backward-compatible).
   pub fn new(desc: &ModelDesc, nn_x: usize, nn_y: usize) -> Self {
-    let model = Model::new(desc, nn_x, nn_y);
+    Self::with_backend(desc, nn_x, nn_y, BackendKind::Cpu)
+  }
+
+  /// Build an evaluator with an explicit [`BackendKind`].
+  ///
+  /// If the requested backend is unavailable the factory falls back to CPU.
+  pub fn with_backend(
+    desc: &ModelDesc,
+    nn_x: usize,
+    nn_y: usize,
+    kind: BackendKind,
+  ) -> Self {
+    let b = backend::build(desc, nn_x, nn_y, kind);
     Evaluator {
       nn_x,
       nn_y,
-      model_version: desc.model_version,
-      num_input_channels: desc.num_input_channels as usize,
-      num_input_global_channels: desc.num_input_global_channels as usize,
-      num_policy_channels: desc.num_policy_channels as usize,
-      num_value_channels: desc.num_value_channels as usize,
-      num_score_value_channels: desc.num_score_value_channels as usize,
-      num_ownership_channels: desc.num_ownership_channels as usize,
-      model,
+      model_version: b.model_version(),
+      num_input_channels: b.num_input_channels(),
+      num_input_global_channels: b.num_input_global_channels(),
+      num_policy_channels: b.num_policy_channels(),
+      num_value_channels: b.num_value_channels(),
+      num_score_value_channels: b.num_score_value_channels(),
+      num_ownership_channels: b.num_ownership_channels(),
+      backend: b,
+    }
+  }
+
+  /// Wrap a pre-built backend directly.
+  pub fn from_backend(b: Box<dyn backend::Backend>, nn_x: usize, nn_y: usize) -> Self {
+    Evaluator {
+      nn_x,
+      nn_y,
+      model_version: b.model_version(),
+      num_input_channels: b.num_input_channels(),
+      num_input_global_channels: b.num_input_global_channels(),
+      num_policy_channels: b.num_policy_channels(),
+      num_value_channels: b.num_value_channels(),
+      num_score_value_channels: b.num_score_value_channels(),
+      num_ownership_channels: b.num_ownership_channels(),
+      backend: b,
     }
   }
 
   /// Run the network for a single board position (batch size 1).
-  ///
-  /// # Parameters
-  /// * `spatial`  – NHWC spatial features: `[H * W * num_input_channels]`
-  ///   in row-major order (position p, channel c → `spatial[p * C + c]`).
-  /// * `global`   – Global features: `[num_input_global_channels]`.
-  ///
-  /// # Panics
-  /// Panics in debug builds if the slice lengths do not match the model's
-  /// expected input sizes.
   pub fn run(&self, spatial: &[f32], global: &[f32]) -> EvalOutput {
     let hw = self.nn_x * self.nn_y;
-    debug_assert_eq!(
-      spatial.len(),
-      hw * self.num_input_channels,
-      "spatial input length mismatch"
-    );
-    debug_assert_eq!(
-      global.len(),
-      self.num_input_global_channels,
-      "global input length mismatch"
-    );
-
-    // Wrap global in [C * N] layout (N=1, so layout == [C])
-    let (policy_pass, policy_spatial, value, score_value, ownership) =
-      self.model.apply(
-        spatial,
-        global,
-        None, // no SGF metadata
-        1,    // batch size
-        self.nn_x,
-        self.nn_y,
-      );
-
-    EvalOutput {
-      policy_pass,
-      policy_spatial,
-      value,
-      score_value,
-      ownership,
-      nn_x: self.nn_x,
-      nn_y: self.nn_y,
-      policy_ch: self.num_policy_channels,
-      value_ch: self.num_value_channels,
-      score_ch: self.num_score_value_channels,
-      ownership_ch: self.num_ownership_channels,
-    }
+    debug_assert_eq!(spatial.len(), hw * self.num_input_channels, "spatial length mismatch");
+    debug_assert_eq!(global.len(), self.num_input_global_channels, "global length mismatch");
+    self.backend.run(spatial, global, None, self.nn_x, self.nn_y)
   }
 
   /// Run the network with optional SGF metadata features.
-  ///
-  /// `meta` – metadata features: `[num_input_meta_channels]` (or `None`).
   pub fn run_with_meta(
     &self,
     spatial: &[f32],
@@ -155,22 +102,6 @@ impl Evaluator {
     let hw = self.nn_x * self.nn_y;
     debug_assert_eq!(spatial.len(), hw * self.num_input_channels);
     debug_assert_eq!(global.len(), self.num_input_global_channels);
-
-    let (policy_pass, policy_spatial, value, score_value, ownership) =
-      self.model.apply(spatial, global, meta, 1, self.nn_x, self.nn_y);
-
-    EvalOutput {
-      policy_pass,
-      policy_spatial,
-      value,
-      score_value,
-      ownership,
-      nn_x: self.nn_x,
-      nn_y: self.nn_y,
-      policy_ch: self.num_policy_channels,
-      value_ch: self.num_value_channels,
-      score_ch: self.num_score_value_channels,
-      ownership_ch: self.num_ownership_channels,
-    }
+    self.backend.run(spatial, global, meta, self.nn_x, self.nn_y)
   }
 }

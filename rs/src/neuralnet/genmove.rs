@@ -203,113 +203,195 @@ mod tests {
   }
 
   // -------------------------------------------------------------------------
-  // genmove tests using .network.bin.gz
+  // WebGPU backend helper
   // -------------------------------------------------------------------------
 
-  /// Smoke test: on a fresh empty board genmove must not return pass.
-  #[test]
-  fn smoke_genmove_not_pass() {
-    let ev = load_evaluator(19, 19);
-    let board = Board::new(19, 19);
-    let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-
-    let mv = genmove(&ev, &board, &hist, Player::Black);
-    assert_ne!(mv, PASS_LOC, "genmove on empty 19×19 returned pass (loc={mv})");
+  /// Try to build a wgpu-backed evaluator using `WgpuBackend::new` directly
+  /// (no fallback). Returns `None` when no GPU adapter is available so the
+  /// calling test can skip cleanly with an early `return`.
+  #[cfg(not(target_arch = "wasm32"))]
+  fn try_load_wgpu_evaluator(nn_x: usize, nn_y: usize) -> Option<Evaluator> {
+    let path = workspace_root().join(".network.bin.gz");
+    let desc = crate::model::ModelDesc::load_from_file(&path)
+      .expect(".network.bin.gz should be present and parseable");
+    match crate::neuralnet::backend_wgpu::WgpuBackend::new(&desc, nn_x, nn_y) {
+      Ok(b) => Some(Evaluator::from_backend(Box::new(b), nn_x, nn_y)),
+      Err(e) => {
+        eprintln!("[wgpu-test] WebGPU unavailable: {e}. Skipping.");
+        None
+      }
+    }
   }
 
-  /// The returned move must satisfy `hist.is_legal()`.
+  // -------------------------------------------------------------------------
+  // genmove tests — WebGPU backend
+  // -------------------------------------------------------------------------
+
+  /// Smoke test: wgpu backend on an empty 19×19 must not return pass.
   #[test]
-  fn genmove_returns_legal_move() {
-    let ev = load_evaluator(19, 19);
+  #[cfg(not(target_arch = "wasm32"))]
+  fn wgpu_smoke_genmove_not_pass() {
+    let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
     let board = Board::new(19, 19);
     let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
+    let mv = genmove(&ev, &board, &hist, Player::Black);
+    assert_ne!(mv, PASS_LOC, "wgpu genmove on empty 19×19 returned pass (loc={mv})");
+  }
 
+  /// wgpu backend must return a legal move on an empty board.
+  #[test]
+  #[cfg(not(target_arch = "wasm32"))]
+  fn wgpu_genmove_returns_legal_move() {
+    let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
+    let board = Board::new(19, 19);
+    let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
     let mv = genmove(&ev, &board, &hist, Player::Black);
     assert!(
       hist.is_legal(&board, mv, Player::Black),
-      "genmove returned illegal move {mv}"
+      "wgpu genmove returned illegal move {mv}"
     );
   }
 
-  /// On a fully occupied 1×1 board the only legal move is pass.
+  /// On a fully occupied 1×1 board the wgpu backend must return pass.
   #[test]
-  fn genmove_full_board_returns_pass() {
-    let ev = load_evaluator(1, 1);
+  #[cfg(not(target_arch = "wasm32"))]
+  fn wgpu_genmove_full_board_returns_pass() {
+    let Some(ev) = try_load_wgpu_evaluator(1, 1) else { return };
     let mut board = Board::new(1, 1);
     board.play_move_assume_legal(location::get_loc(0, 0, 1), Player::Black);
     let hist = BoardHistory::new(&board, Player::White, Rules::default(), 0);
-
     let mv = genmove(&ev, &board, &hist, Player::White);
     assert_eq!(mv, PASS_LOC, "expected pass on full board, got {mv}");
   }
 
-  /// After one Black move the network returns a legal non-pass move for White.
+  /// After one Black move at tengen, the wgpu backend returns a legal
+  /// non-pass move for White.
   #[test]
-  fn genmove_after_one_move_is_legal_not_pass() {
-    let ev = load_evaluator(19, 19);
+  #[cfg(not(target_arch = "wasm32"))]
+  fn wgpu_genmove_after_one_move() {
+    let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
     let mut board = Board::new(19, 19);
     let mut hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-    let first = location::get_loc(9, 9, 19); // tengen
-    hist.make_board_move(&mut board, first, Player::Black, None);
-
+    hist.make_board_move(&mut board, location::get_loc(9, 9, 19), Player::Black, None);
     let mv = genmove(&ev, &board, &hist, Player::White);
     assert_ne!(mv, PASS_LOC, "expected non-pass after one move");
     assert!(
       hist.is_legal(&board, mv, Player::White),
-      "genmove returned illegal move {mv}"
+      "wgpu genmove returned illegal move {mv}"
     );
   }
 
-  /// On a 9×9 board the model's preferred move should be on the board
-  /// (inside the 9×9 area) and legal.
+  /// On a 9×9 board the wgpu preferred move should be legal and within the grid.
   #[test]
-  fn genmove_9x9_is_legal_on_board() {
-    let ev = load_evaluator(9, 9);
+  #[cfg(not(target_arch = "wasm32"))]
+  fn wgpu_genmove_9x9_is_legal_on_board() {
+    let Some(ev) = try_load_wgpu_evaluator(9, 9) else { return };
     let board = Board::new(9, 9);
     let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-
     let mv = genmove(&ev, &board, &hist, Player::Black);
     assert_ne!(mv, PASS_LOC, "expected non-pass on empty 9×9");
-    assert!(
-      hist.is_legal(&board, mv, Player::Black),
-      "move {mv} is illegal on 9×9"
-    );
-    // The loc should correspond to a position within [0..9) × [0..9).
+    assert!(hist.is_legal(&board, mv, Player::Black), "move {mv} is illegal on 9×9");
     let x = location::get_x(mv, 9);
     let y = location::get_y(mv, 9);
-    assert!(x < 9 && y < 9, "move ({x},{y}) is outside the 9×9 board");
+    assert!(x < 9 && y < 9, "wgpu move ({x},{y}) is outside the 9×9 board");
   }
 
-  /// Two consecutive calls with the same (deterministic) inputs must return
-  /// the same move.
+  /// Two consecutive wgpu forward passes with identical inputs must agree.
   #[test]
-  fn genmove_is_deterministic() {
-    let ev = load_evaluator(19, 19);
+  #[cfg(not(target_arch = "wasm32"))]
+  fn wgpu_genmove_is_deterministic() {
+    let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
     let board = Board::new(19, 19);
     let hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
-
     let mv1 = genmove(&ev, &board, &hist, Player::Black);
     let mv2 = genmove(&ev, &board, &hist, Player::Black);
-    assert_eq!(mv1, mv2, "genmove must be deterministic");
+    assert_eq!(mv1, mv2, "wgpu genmove must be deterministic");
   }
 
-  /// After both players pass once the network still returns a legal move
-  /// (pass is itself always legal, but the function prefers non-pass).
+  /// After both players pass, the wgpu backend still returns a legal move (or
+  /// pass if the game is already finished).
   #[test]
-  fn genmove_after_two_passes_returns_legal() {
-    let ev = load_evaluator(19, 19);
+  #[cfg(not(target_arch = "wasm32"))]
+  fn wgpu_genmove_after_two_passes_returns_legal() {
+    let Some(ev) = try_load_wgpu_evaluator(19, 19) else { return };
     let mut board = Board::new(19, 19);
     let mut hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
     hist.make_board_move(&mut board, PASS_LOC, Player::Black, None);
     hist.make_board_move(&mut board, PASS_LOC, Player::White, None);
-
-    // Game may now be finished; if so, is_legal always returns false —
-    // just check the move is PASS_LOC in that case.
     let mv = genmove(&ev, &board, &hist, Player::Black);
     if hist.is_game_finished {
       assert_eq!(mv, PASS_LOC, "game over: expected pass");
     } else {
-      assert!(hist.is_legal(&board, mv, Player::Black), "illegal move {mv}");
+      assert!(hist.is_legal(&board, mv, Player::Black), "wgpu returned illegal move {mv}");
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Cross-backend numerical validation
+  // -------------------------------------------------------------------------
+
+  /// The wgpu and CPU backends must agree on value-head outputs, pass-policy,
+  /// and the argmax policy move for the same input position.
+  ///
+  /// Tolerance is 1e-3 to account for f32 GPU/CPU arithmetic differences.
+  #[test]
+  #[cfg(not(target_arch = "wasm32"))]
+  fn wgpu_outputs_match_cpu() {
+    let Some(wgpu_ev) = try_load_wgpu_evaluator(9, 9) else { return };
+    let cpu_ev = load_evaluator(9, 9);
+
+    let nn_x = 9usize;
+    let nn_y = 9usize;
+    let nc = cpu_ev.num_input_channels;
+    let ng = cpu_ev.num_input_global_channels;
+
+    // Non-trivial position: two stones on a 9×9.
+    let mut board = Board::new(9, 9);
+    let mut hist = BoardHistory::new(&board, Player::Black, Rules::default(), 0);
+    hist.make_board_move(&mut board, location::get_loc(4, 4, 9), Player::Black, None);
+    hist.make_board_move(&mut board, location::get_loc(2, 6, 9), Player::White, None);
+
+    let mut spatial = vec![0.0f32; nn_y * nn_x * nc];
+    let mut global  = vec![0.0f32; ng];
+    crate::neuralnet::nninputs::fill_row(
+      &board, &hist, Player::Black, nn_x, nn_y, nc, ng,
+      &mut spatial, &mut global,
+    );
+
+    let cpu_out  = cpu_ev.run(&spatial, &global);
+    let wgpu_out = wgpu_ev.run(&spatial, &global);
+
+    // value head
+    assert_eq!(cpu_out.value.len(), wgpu_out.value.len(), "value length mismatch");
+    for (i, (c, g)) in cpu_out.value.iter().zip(wgpu_out.value.iter()).enumerate() {
+      assert!(
+        (c - g).abs() < 1e-3,
+        "value[{i}]: CPU={c:.6} wgpu={g:.6} diff={:.2e}", (c - g).abs()
+      );
+    }
+
+    // policy_pass head
+    assert_eq!(cpu_out.policy_pass.len(), wgpu_out.policy_pass.len(), "policy_pass length mismatch");
+    for (i, (c, g)) in cpu_out.policy_pass.iter().zip(wgpu_out.policy_pass.iter()).enumerate() {
+      assert!(
+        (c - g).abs() < 1e-3,
+        "policy_pass[{i}]: CPU={c:.6} wgpu={g:.6} diff={:.2e}", (c - g).abs()
+      );
+    }
+
+    // top policy spatial move (argmax on channel 0) must agree
+    let argmax = |out: &crate::neuralnet::eval::EvalOutput| {
+      out.policy_spatial
+        .chunks(out.policy_ch)
+        .map(|ch| ch[0])
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+    };
+    assert_eq!(
+      argmax(&cpu_out),
+      argmax(&wgpu_out),
+      "CPU and wgpu disagree on the top-1 policy move"
+    );
   }
 }
