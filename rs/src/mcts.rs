@@ -171,44 +171,56 @@ async fn run_playout(
   nn_x: usize,
   nn_y: usize,
 ) {
-  // Walk down, collecting the path of mutable raw pointers so we can
-  // backpropagate afterward without fighting the borrow checker.
-  let mut path: Vec<*mut Node> = vec![root as *mut Node];
+  // Phase 1 — Selection.
+  //
+  // Walk down the tree using Rust's reborrow rule: assigning
+  // `node = &mut node.children[idx]` drops the parent borrow and creates a
+  // child borrow, so each step is safe.  We record the chosen child index at
+  // every level so we can re-navigate for backpropagation.
+  let mut index_path: Vec<usize> = Vec::new();
   let mut current_player = root_player;
-
-  // SAFETY: We traverse one path at a time; no two active borrows overlap.
-  unsafe {
-    loop {
-      let node = &mut **path.last().unwrap();
-
-      if node.children.is_empty() {
-        // Leaf: expand then evaluate.
-        let nn =
-          crate::genmove::position_eval(evaluator, board, hist, current_player)
-            .await;
-        let policy = nn.get_policy().to_vec(); // clone before expand borrows node
-        expand_node(node, board, hist, current_player, &policy, nn_x, nn_y);
-
-        let leaf_value = value_from_nn(&nn, current_player);
-        // Backpropagate from leaf up to root.
-        for &ptr in &path {
-          backprop_node(&mut *ptr, leaf_value, &nn);
-        }
-        return;
-      }
-
-      // Select best child by PUCT.
-      let parent_visits = node.visits;
-      let best_idx = select_child(node, parent_visits);
-      let child = &mut node.children[best_idx];
-
-      // Play the child's move on the working board.
-      hist.make_board_move(board, child.loc, current_player, None);
+  {
+    let mut node: &mut Node = root;
+    while !node.children.is_empty() {
+      let idx = select_child(node, node.visits);
+      let child_loc = node.children[idx].loc;
+      hist.make_board_move(board, child_loc, current_player, None);
       current_player = current_player.opponent();
-
-      path.push(child as *mut Node);
+      index_path.push(idx);
+      node = &mut node.children[idx]; // reborrow: parent borrow released
     }
+    // `node` (the leaf) is dropped here, releasing the borrow on `root`.
   }
+
+  // Phase 2 — Evaluation (no borrow of the tree is held across the await).
+  let nn =
+    crate::genmove::position_eval(evaluator, board, hist, current_player).await;
+  let policy = nn.get_policy().to_vec();
+
+  // Phase 3 — Expansion: re-navigate to the leaf and add its children.
+  {
+    let leaf = navigate_mut(root, &index_path);
+    expand_node(leaf, board, hist, current_player, &policy, nn_x, nn_y);
+  }
+
+  // Phase 4 — Backpropagation: update every node from root down to the leaf.
+  // Each `navigate_mut` call is an independent fresh borrow, released before
+  // the next iteration.
+  let leaf_value = value_from_nn(&nn, current_player);
+  for prefix_len in 0..=index_path.len() {
+    let node = navigate_mut(root, &index_path[..prefix_len]);
+    backprop_node(node, leaf_value, &nn);
+  }
+}
+
+/// Walk `path` of child indices from `root`, returning a mutable reference to
+/// the node at the end of the path.
+fn navigate_mut<'a>(root: &'a mut Node, path: &[usize]) -> &'a mut Node {
+  let mut node = root;
+  for &idx in path {
+    node = &mut node.children[idx];
+  }
+  node
 }
 
 // ---------------------------------------------------------------------------
